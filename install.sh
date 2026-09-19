@@ -404,7 +404,7 @@ write_router_config() {
     chmod 0644 "$CONFIG_FILE"
 
     say "Escrito $CONFIG_FILE"
-    if [[ -z "$rules" ]]; then
+    if [[ ${#rule_lines[@]} -eq 0 ]]; then
         say "SIN REGLAS: ningún repositorio se enrutará y toda operación de cloud"
         say "            será rechazada hasta que las añada."
     fi
