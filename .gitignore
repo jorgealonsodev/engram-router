@@ -7,3 +7,7 @@ config/router.json
 # Local instance state
 .engram/
 *.log
+
+# Local tooling artifacts
+.atl/
+.codegraph/

@@ -1,126 +1,190 @@
-# Engram multi-cloud router
+# engram-router
 
-Routes each git repository's Engram memories to the correct Engram Cloud
-(company vs. personal), so switching between work and personal projects
-cannot replicate data to the wrong server.
+Route each git repository's [Engram](https://github.com/Gentleman-Programming/engram)
+memories to the correct Engram Cloud, so moving between work and personal
+projects cannot replicate data to the wrong server.
 
 ## Why this exists
 
-Engram 2.0.0 has no per-project cloud routing: one process, one global
-`cloud.json`, one destination. If your shell also has `ENGRAM_CLOUD_*`
-exported (a common personal-account setup), it silently overrides
-`cloud.json` for every project, work included. This router closes that gap
-without touching Engram itself: it runs multiple isolated Engram instances
-(one data dir per cloud) and picks the right one per repository, based on
-the repository's git remote.
+Engram has no per-project cloud routing.
 
-See `odd/tasks/engram-multi-cloud-router.md` for the full list of verified
-findings this design is built on.
+- `engram cloud config` accepts one global `--server`. There is a single
+  `cloud.json` for the whole installation.
+- Enrollment (`engram cloud enroll <project>`) decides **whether** a project
+  replicates, never **where**. Its table is
+  `sync_enrolled_projects(project TEXT PRIMARY KEY, enrolled_at TEXT)` — no
+  server column.
+- Autosync runs inside the resident `engram serve` daemon, whose environment
+  is frozen at exec. Setting `ENGRAM_CLOUD_SERVER` per command never reaches it.
+- `sync_state.target_key` is `cloud:<project>`, with no server identity, so
+  repointing one installation at a second server reuses acknowledgement
+  cursors across different backends.
+
+The consequence: with one installation and two clouds, whichever server the
+daemon started with receives everything that is enrolled.
+
+This tool does not patch Engram. It gives each destination its own isolated
+Engram instance and picks the right one per repository.
 
 ## How it works
 
-- **`lib/router.sh`** — shared logic: normalizes a git remote URL to a
-  comparable `host[:port]/owner` form, and matches it against your rules
-  file (first match wins, evaluated in file order).
-- **`bin/engram`** — a shim you put ahead of the real `engram` binary on
-  your `PATH`. For every invocation it resolves the current repository's
-  instance and sets `ENGRAM_DATA_DIR` accordingly, then execs the real
-  binary. It never reads, writes, passes, or logs a token — it only ever
-  selects a data directory. Credentials always come from each instance's
-  own `cloud.json`.
-- **`bin/engram-router`** (also installed as **`engram-where`**) — explains
-  routing for a repository: which remote, which rule matched, which
-  instance, which cloud server, what state.
-- **`bin/engram-doctor`** — read-only diagnostics: environment pollution,
-  `PATH` precedence, per-instance credential-source readback, daemon
-  liveness, and the routing explanation for your current directory. Exits
-  non-zero on any failure.
-- **`systemd/engram@.service`** — a templated systemd `--user` unit
-  (`engram@work.service`, `engram@personal.service`, ...), one process per
-  instance, each with its own `ENGRAM_DATA_DIR` and therefore its own
-  database and credentials.
+```
+  git remote origin
+        |
+        v
+  .engram/config.json "instance"  ->  explicit override
+        |  (absent)
+        v
+  rules in router.json            ->  first matching prefix wins
+        |  (no match)
+        v
+  local operations: default instance
+  cloud operations: REFUSED
+```
 
-## Resolution order
+Each instance is a separate Engram installation root: its own data directory,
+database, sync cursors, enrollment set and credentials. Two instances cannot
+contaminate each other because they share no state.
 
-1. `.engram/config.json` in the repository, if it has an `"instance"` key
-   (added alongside the existing `"project_name"` key — no new marker
-   file).
-2. The first matching rule in `router.json`, evaluated in file order.
-3. Unmatched.
+### Fail-closed, asymmetrically
 
-## What happens when a repo doesn't match anything
+Local operations (`search`, `save`, `context`) always pass through. Cloud
+operations (`sync`, `cloud ...`) are refused whenever routing is unresolved.
 
-Local Engram operations (`search`, `save`, ...) still work normally,
-against whatever the default instance is. **Cloud operations** (`sync`,
-`cloud enroll`, `cloud config`, ...) are **refused**, with an explanation of
-why and how to add a rule. This asymmetry is deliberate: the shim's failure
-mode is silence, never misdirection. It will never guess a destination for
-you.
+This asymmetry is deliberate: a routing bug degrades to *no sync*, which is
+noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
+
+## Files this tool touches
+
+### Creates — all new, none shared with an existing installation
+
+| Path | Purpose | Mode |
+|---|---|---|
+| `~/.local/bin/engram` | the PATH shim | 0755 |
+| `~/.local/bin/engram-router` | resolution and explanation | 0755 |
+| `~/.local/bin/engram-doctor` | read-only diagnostics | 0755 |
+| `~/.local/bin/engram-where` | symlink to `engram-router` | — |
+| `~/.local/lib/engram-router/router.sh` | shared library | 0644 |
+| `~/.config/engram-router/router.json` | your routing rules | 0644 |
+| `~/.config/engram-router/instances/<name>.env` | per-instance autosync flag | 0644 |
+| `~/.config/systemd/user/engram@.service` | templated user unit | 0644 |
+| `~/.local/share/engram-<instance>/` | instance root | 0700 |
+| `~/.local/share/engram-<instance>/cloud.json` | that instance's credentials | **0600** |
+
+`~/.local/share/engram-<instance>/engram.db` and `.instance-id` are created by
+Engram itself the first time that instance's daemon starts. This tool never
+writes them.
+
+### Reads, never modifies
+
+| Path | Why |
+|---|---|
+| `<repo>/.engram/config.json` | the optional `instance` key, read alongside Engram's own `project_name` |
+| `<repo>/.git/config` | the `origin` remote, via `git remote get-url` |
+
+`.engram/config.json` is Engram's existing per-repository config file. This
+tool adds an `instance` key to it rather than introducing a second marker file.
+
+### Never touched
+
+- **`~/.engram/`** — an existing single-instance installation, its database,
+  its `cloud.json` and its enrollments are left exactly as they are. Nothing in
+  this repository references that path.
+- **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
+  `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
+  `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It
+  never edits them.
+- **Engram's source.** No patch, no fork, no rebuild.
+
+## The environment hazard
+
+Engram resolves credentials from `cloud.json` **only when the environment is
+clean**. Environment variables win:
+
+```
+clean environment      Server source: cloud.json
+ENGRAM_CLOUD_* set     Server source: ENGRAM_CLOUD_SERVER
+```
+
+If `ENGRAM_CLOUD_SERVER` and `ENGRAM_CLOUD_TOKEN` are exported globally, every
+instance silently uses those instead of its own `cloud.json` — a "work"
+instance would present the personal token to the company server. Remove those
+exports before installing. `engram-doctor` checks for them.
+
+Note that `~/.config/environment.d/*.conf` is systemd *user* environment,
+inherited by every process in the session, not only by shells.
 
 ## Install
 
 ```sh
+git clone https://github.com/your-user/engram-router
+cd engram-router
 ./install.sh
 ```
 
-The installer is interactive, safe to re-run, and:
+The installer is interactive and idempotent. It asks whether you also have a
+personal Engram; the default is a single work instance. It prompts for your
+token, writes it to `cloud.json` with mode 0600, and never echoes or logs it.
+It verifies the shim actually wins in `PATH`, then runs the doctor.
 
-- Stops immediately (without editing anything) if it finds `ENGRAM_CLOUD_*`
-  exported in your shell or in `~/.bashrc`, `~/.profile`,
-  `~/.zshrc`/`~/.zprofile`, or `~/.config/environment.d/*.conf`. Those
-  variables silently override `cloud.json`; you must remove them by hand.
-- Defaults to **one instance (work)**. A personal instance is opt-in.
-- Writes each instance's `cloud.json` with `0600` permissions and never
-  echoes or logs the token you paste in.
-- Verifies afterwards that `engram` on your `PATH` actually resolves to the
-  installed shim, and tells you exactly how to fix your `PATH` if not.
-- Finishes by running `engram-doctor` and showing you the result.
+Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
+are per person; this repository ships none.
 
-Colleagues coming from an existing single-instance Engram setup: the
-installer will warn you that any projects already enrolled there, and any
-sync mutations already queued, are "destination-blind" (they carry no
-server identity) — review them before turning on multi-instance sync.
+## Configuring your rules
 
-## Configuring your own rules
-
-Edit `~/.config/engram-router/router.json` (installed from
-`config/router.example.json` on first run, never overwritten afterwards).
-Each rule is:
+`~/.config/engram-router/router.json`, modelled on `config/router.example.json`:
 
 ```json
-{ "prefix": "github.com/your-org", "instance": "work" }
+{
+  "rules": [
+    { "prefix": "github.com/your-org",              "instance": "work" },
+    { "prefix": "gitlab.example.com:8443/your-user", "instance": "work" },
+    { "prefix": "github.com/your-user",              "instance": "personal" }
+  ]
+}
 ```
 
-`prefix` is matched against the normalized remote (`host[:port]/owner`) —
-exact match, or as a `/`-bounded prefix. Rules are evaluated top to bottom;
-the first match wins. A bare host like `gitlab.com` is **not** assumed to
-mean anything by itself — write the full `host/owner` you actually want,
-since the same host can host both work and personal repositories.
+Rules match a normalized `host[:port]/owner` form, first match wins, in file
+order. Never assume a host implies a role — a self-hosted GitLab can be the
+work one while `gitlab.com` hosts personal repositories.
+
+These remote forms are all normalized and covered by tests:
+
+```
+git@github.com:org/repo.git
+https://github.com/org/repo.git
+ssh://git@gitlab.example.com:8443/owner/repo.git
+gitlab.example.com:8443/owner/repo.git     # SCP syntax with a port
+git::@github.com/owner/repo                # plugin-manager prefix
+```
 
 ## Per-repository override
 
-To pin one repository to a specific instance regardless of rules, add to
-its `.engram/config.json`:
-
 ```json
-{ "project_name": "...", "instance": "personal" }
+{
+  "project_name": "my-project",
+  "instance": "work"
+}
 ```
 
-## Diagnosing problems
+in that repository's `.engram/config.json`. It beats the rules. Commit it and
+your teammates inherit the routing.
+
+## Diagnosing
 
 ```sh
-engram-doctor      # full read-only diagnostic, non-zero exit on failure
-engram-where        # routing explanation for the current repository
+engram-where     # where does THIS repository sync, and why
+engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
 ```
-
-`engram-doctor` never mutates anything — no file, no daemon, no database.
 
 ## Uninstalling
 
-Remove `~/.local/bin/engram`, `~/.local/bin/engram-router`,
-`~/.local/bin/engram-where`, `~/.local/bin/engram-doctor`,
-`~/.local/lib/engram-router/`, `~/.config/engram-router/`, and
-`~/.config/systemd/user/engram@.service` (after `systemctl --user disable
---now engram@<instance>.service` for any enabled instance). Your
-per-instance data (`~/.local/share/engram-<instance>/`) is left in place;
-remove it manually if you no longer need it.
+```sh
+systemctl --user disable --now engram@<instance>.service
+rm -rf ~/.local/bin/engram ~/.local/bin/engram-{router,doctor,where} \
+       ~/.local/lib/engram-router ~/.config/engram-router \
+       ~/.config/systemd/user/engram@.service
+```
+
+Instance data under `~/.local/share/engram-*` is left in place; remove it
+deliberately, since it holds memories that may not exist anywhere else.

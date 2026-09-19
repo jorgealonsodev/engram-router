@@ -228,12 +228,14 @@ provision_instance() {
         return
     fi
 
-    # Written directly, never echoed and never logged. Field names follow
-    # the documented file-based credential model (verified findings #1 and
-    # #6: "server" comes from `engram cloud config --server`, "token" is
-    # what cloud.json supplies when the environment is clean).
+    # Written directly, never echoed and never logged.
+    #
+    # The URL key MUST be "server_url", not "server". Engram reads "server_url";
+    # given "server" it reports `not configured (no effective server URL)` while
+    # still reading the token from the same file, so the instance looks half
+    # configured instead of failing outright. Verified against engram v2.0.0.
     umask 077
-    printf '{\n  "server": "%s",\n  "token": "%s"\n}\n' "$server" "$token" > "$cloud_json"
+    printf '{\n  "server_url": "%s",\n  "token": "%s"\n}\n' "$server" "$token" > "$cloud_json"
     chmod 0600 "$cloud_json"
     umask 022
 
