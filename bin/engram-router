@@ -54,7 +54,11 @@ _instance_cloud_server() {
     content="$(cat "$cloud_json")"
     local -A obj=()
     _router_json_parse_flat_object "$content" 0 obj || return 1
-    local server="${obj[server]:-}"
+    # Engram's own cloud.json uses "server_url"; "server" is accepted too so a
+    # file written by an older version of this installer still reads. Getting
+    # this wrong is silent: the file is there and the token parses, only the
+    # URL comes back empty.
+    local server="${obj[server_url]:-${obj[server]:-}}"
     [[ -n "$server" ]] || return 1
     printf '%s\n' "$server"
 }
