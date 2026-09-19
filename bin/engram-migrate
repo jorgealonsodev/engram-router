@@ -16,6 +16,8 @@
 # unconditionally, so once the rule matches there is no way back to the source.
 set -euo pipefail
 
+SCRIPT_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENGRAM_ROUTER_LIB_DIR="${ENGRAM_ROUTER_LIB_DIR:-$HOME/.local/lib/engram-router}"
 CONFIG_DIR="${ENGRAM_ROUTER_CONFIG_DIR:-$HOME/.config/engram-router}"
 CONFIG_FILE="$CONFIG_DIR/router.json"
 
@@ -32,7 +34,9 @@ Uso: engram-migrate --from <instancia> --to <instancia> [opciones]
 Ejecútelo DENTRO del repositorio que quiere migrar.
 
   --from <nombre>          Instancia origen (donde están hoy las memorias).
-  --to <nombre>            Instancia destino.
+                           Si se omite y solo hay otra instancia, se deduce.
+  --to <nombre>            Instancia destino. Si se omite, se toma de las
+                           reglas de enrutado de este repositorio.
   --dry-run                Muestra el plan y no cambia nada.
   --keep-source-enrolled   No desenrola en origen (seguirá replicando allí).
   --clean-chunks           Borra los chunks exportados al terminar.
@@ -54,6 +58,59 @@ while [[ $# -gt 0 ]]; do
         *) printf 'Opción desconocida: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+# --to defaults to whatever the routing rules say this repository belongs to,
+# and --from to the only other configured instance. Both stop and ask rather
+# than guess: with three instances "the other one" is not a single answer, and
+# guessing wrong would migrate from an empty instance, count 0 against 0 and
+# report success — the silent failure this tool exists to prevent.
+# Uses the shared parser rather than a sed of its own. A hand-rolled one
+# returned a single name from a router.json written on one line — greedy
+# matching kept only the last instance — and the caller then treated it as
+# "the only other instance" and picked it. Silently choosing a source is the
+# failure this inference exists to avoid, so it must not be introduced here.
+list_instances() {
+    [[ -r "$CONFIG_FILE" ]] || return 1
+    local lib
+    for lib in "$ENGRAM_ROUTER_LIB_DIR/router.sh" "$HOME/.local/lib/engram-router/router.sh" \
+               "$SCRIPT_SELF_DIR/../lib/router.sh"; do
+        [[ -r "$lib" ]] || continue
+        # shellcheck source=/dev/null
+        source "$lib"
+        INSTANCE_NAMES=()
+        router_load_config "$CONFIG_FILE" 2>/dev/null || return 1
+        printf '%s\n' ${INSTANCE_NAMES[@]+"${INSTANCE_NAMES[@]}"}
+        return 0
+    done
+    return 1
+}
+
+if [[ -z "$TO" ]]; then
+    TO="$("$SCRIPT_SELF_DIR/engram-router" resolve 2>/dev/null | sed -n 's/^INSTANCE=//p' || true)"
+    [[ -n "$TO" ]] || die \
+"no se ha indicado --to y las reglas de enrutado no resuelven este repositorio.
+        Indique el destino:  engram-migrate --to <instancia>
+        Para ver por qué no resuelve:  engram-where"
+    say "destino deducido de las reglas: '$TO'"
+fi
+
+if [[ -z "$FROM" ]]; then
+    local_others=()
+    while IFS= read -r inst; do
+        [[ -n "$inst" && "$inst" != "$TO" ]] && local_others+=("$inst")
+    done < <(list_instances)
+
+    case ${#local_others[@]} in
+        1) FROM="${local_others[0]}"
+           say "origen deducido: '$FROM' (la única otra instancia configurada)" ;;
+        0) die "no hay ninguna otra instancia configurada desde la que migrar." ;;
+        *) die \
+"hay varias instancias posibles como origen: ${local_others[*]}
+        Indique cuál con --from <instancia>. No se deduce: migrar desde la
+        instancia equivocada exportaría cero memorias y la comprobación daría
+        0 contra 0, informando de un éxito que no lo es." ;;
+    esac
+fi
 
 [[ -n "$FROM" && -n "$TO" ]] || { usage >&2; exit 2; }
 [[ "$FROM" != "$TO" ]] || die "origen y destino son la misma instancia ('$FROM')."

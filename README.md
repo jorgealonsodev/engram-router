@@ -244,9 +244,19 @@ it is scripted:
 
 ```sh
 cd <repository>
-engram-migrate --from personal --to work --dry-run   # show the plan
-engram-migrate --from personal --to work             # do it
+engram-migrate --dry-run   # show the plan
+engram-migrate             # do it
 ```
+
+Both instances are inferred: the destination from the routing rules for this
+repository, the source from the only other configured instance. Either can be
+given explicitly with `--to` and `--from`.
+
+Inference stops rather than guesses. With three instances configured, "the
+other one" is not a single answer, so it names them and asks for `--from`:
+picking wrong would export from an empty instance, count zero against zero and
+report success — the silent kind of failure this tool exists to prevent. A
+repository that matches no rule is refused the same way.
 
 It verifies the destination resolves from its own `cloud.json` before touching
 anything, exports (project-scoped), imports, **checks the counts agree before
@@ -317,6 +327,21 @@ engram-where     # where does THIS repository sync, and why
 engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
 engram-migrate   # move a repository's memories between instances
 ```
+
+`engram-router resolve` prints the same resolution as `engram-where` in
+`KEY=value` lines, for scripting:
+
+```
+REMOTE=https://github.com/your-org/example.git
+NORMALIZED=github.com/your-org
+SOURCE=rule
+MATCHED_RULE=github.com/your-org
+INSTANCE=work
+DATA_DIR=/home/you/.local/share/engram-work
+```
+
+`SOURCE` is `rule`, `override` or `unmatched`, so a caller can tell a resolved
+instance from a defaulted one.
 
 ## Not supported
 
