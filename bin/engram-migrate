@@ -86,12 +86,35 @@ list_instances() {
 }
 
 if [[ -z "$TO" ]]; then
-    TO="$("$SCRIPT_SELF_DIR/engram-router" resolve 2>/dev/null | sed -n 's/^INSTANCE=//p' || true)"
-    [[ -n "$TO" ]] || die \
-"no se ha indicado --to y las reglas de enrutado no resuelven este repositorio.
+    # Gate on SOURCE, not on INSTANCE being non-empty. SOURCE says explicitly
+    # whether the instance was resolved ("rule", "override") or defaulted
+    # ("unmatched"); INSTANCE happens to be blank when unmatched today, but
+    # that is an implementation detail of router_resolve, and the documented
+    # behaviour is that an unmatched repository still gets a default instance
+    # for local operations. Relying on the blank would let a repository that
+    # matches no rule be migrated into the default — and a migration enrolls
+    # the destination and unenrols the source, so there is nothing to undo.
+    resolved="$("$SCRIPT_SELF_DIR/engram-router" resolve 2>/dev/null || true)"
+    resolved_source="$(printf '%s' "$resolved" | sed -n 's/^SOURCE=//p' | head -1)"
+    resolved_instance="$(printf '%s' "$resolved" | sed -n 's/^INSTANCE=//p' | head -1)"
+
+    case "$resolved_source" in
+        rule|override) : ;;
+        *) die \
+"no se ha indicado --to y este repositorio no resuelve a ninguna instancia
+        (SOURCE=${resolved_source:-desconocido}). No se deduce un destino por
+        defecto: la migración enrola el destino y desenrola el origen, así que
+        un destino equivocado no se puede deshacer.
         Indique el destino:  engram-migrate --to <instancia>
-        Para ver por qué no resuelve:  engram-where"
-    say "destino deducido de las reglas: '$TO'"
+        Para ver por qué no resuelve:  engram-where" ;;
+    esac
+
+    [[ -n "$resolved_instance" ]] || die \
+"el resolver informa SOURCE=$resolved_source pero no da instancia. No se
+        migra sin un destino explícito:  engram-migrate --to <instancia>"
+
+    TO="$resolved_instance"
+    say "destino deducido de las reglas: '$TO' (SOURCE=$resolved_source)"
 fi
 
 if [[ -z "$FROM" ]]; then
