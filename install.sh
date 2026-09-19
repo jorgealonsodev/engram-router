@@ -575,6 +575,35 @@ json_escape() {
     printf '%s' "$v"
 }
 
+# Parses the file just written with the shared library and compares what came
+# back against what was requested. Counting is enough: a file that parses but
+# lost an entry is as broken as one that does not parse at all.
+verify_written_config() {
+    local want_rules="$1" want_instances="$2"
+
+    # shellcheck source=lib/router.sh
+    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh" || return 1
+
+    RULE_PREFIXES=(); RULE_INSTANCES=(); INSTANCE_NAMES=()
+    router_load_config "$CONFIG_FILE" 2>/dev/null || return 1
+
+    local got_rules="${#RULE_PREFIXES[@]}" got_instances="${#INSTANCE_NAMES[@]}"
+    if [[ "$got_rules" -ne "$want_rules" || "$got_instances" -ne "$want_instances" ]]; then
+        printf '  releídas %s regla(s) y %s instancia(s); se esperaban %s y %s\n' \
+            "$got_rules" "$got_instances" "$want_rules" "$want_instances" >&2
+        return 1
+    fi
+
+    local name
+    for name in ${INSTANCES_TO_PROVISION[@]+"${INSTANCES_TO_PROVISION[@]}"}; do
+        [[ -n "${INSTANCE_DATA_DIR[$name]:-}" ]] || {
+            printf "  la instancia '%s' no tiene data_dir tras releer\n" "$name" >&2
+            return 1
+        }
+    done
+    return 0
+}
+
 write_router_config() {
     section "Reglas de enrutado"
 
@@ -625,6 +654,26 @@ write_router_config() {
     chmod 0644 "$CONFIG_FILE"
 
     say "Escrito $CONFIG_FILE (${#rule_lines[@]} regla(s), ${#instance_lines[@]} instancia(s))"
+
+    # Read the file back with the same parser the router uses, and check it
+    # describes what was just asked for. Writing a config the router cannot
+    # parse while reporting success is the failure this whole tool exists to
+    # prevent; an escaping bug did exactly that before this check existed.
+    if ! verify_written_config "${#rule_lines[@]}" "${#instance_lines[@]}"; then
+        # Backups are named .bak.YYYYMMDD_HHMMSS, so the glob's sorted order is
+        # chronological and the last entry is the newest. No ls parsing.
+        local restored="" newest=""
+        local -a backups=("$CONFIG_FILE".bak.*)
+        if [[ -e "${backups[0]}" ]]; then
+            newest="${backups[-1]}"
+            cp -p "$newest" "$CONFIG_FILE"
+            restored=" Se ha restaurado la configuración anterior desde $(basename "$newest")."
+        fi
+        printf '\nERROR: la configuración escrita no se puede volver a leer.%s\n' "$restored" >&2
+        printf 'No se ha completado la instalación. Revise %s\n' "$CONFIG_FILE" >&2
+        exit 1
+    fi
+    say "Verificado: la configuración se relee correctamente."
     if [[ ${#rule_lines[@]} -eq 0 ]]; then
         say "SIN REGLAS: ningún repositorio se enrutará y toda operación de cloud"
         say "            será rechazada hasta que las añada."
