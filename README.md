@@ -4,6 +4,15 @@ Route each git repository's [Engram](https://github.com/Gentleman-Programming/en
 memories to the correct Engram Cloud, so moving between work and personal
 projects cannot replicate data to the wrong server.
 
+## Requirements
+
+Linux or macOS. The shim, the installer and the per-instance daemons are bash
+and systemd user units; Windows is not supported and is not planned — see
+[Not supported](#not-supported).
+
+Engram itself, `git`, and `sqlite3` for the migration's row check (optional;
+without it the check degrades to a weaker one).
+
 ## Why this exists
 
 Engram has no per-project cloud routing.
@@ -63,6 +72,7 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 | `~/.local/bin/engram` | the PATH shim | 0755 |
 | `~/.local/bin/engram-router` | resolution and explanation | 0755 |
 | `~/.local/bin/engram-doctor` | read-only diagnostics | 0755 |
+| `~/.local/bin/engram-migrate` | moves a project between instances | 0755 |
 | `~/.local/bin/engram-where` | symlink to `engram-router` | — |
 | `~/.local/lib/engram-router/router.sh` | shared library | 0644 |
 | `~/.config/engram-router/router.json` | your routing rules | 0644 |
@@ -72,8 +82,8 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 | `~/.local/share/engram-<instance>/cloud.json` | that instance's credentials | **0600** |
 
 `~/.local/share/engram-<instance>/engram.db` and `.instance-id` are created by
-Engram itself the first time that instance's daemon starts. This tool never
-writes them.
+Engram itself, the first time anything reaches that instance — through its
+daemon or through the shim. This tool never writes them.
 
 ### Reads, never modifies
 
@@ -122,23 +132,40 @@ cd engram-router
 ./install.sh
 ```
 
-Re-running the installer over an existing configuration shows it and offers to
-keep it, add an instance, modify one, or start over. Modifying one lists its
-current namespaces and adds to them: type a new one to append it, or
-`-<namespace>` to drop it. Nothing has to be retyped. Keeping or adding never
-re-asks for the credentials of instances you are not touching, and the previous
-`router.json` is backed up beside itself.
-
-The installer is interactive and idempotent. It asks for instance names one at
-a time — press Enter on the first prompt to accept a single `work` instance, or
-name as many as you need. For each one it prompts for the server URL and token, then for its namespaces
-one per line until you press Enter,
-writes them to that instance's `cloud.json` with mode 0600, and never echoes or
-logs the token. It then verifies the shim actually wins in `PATH` and runs the
-doctor.
+The installer is interactive and idempotent. For each instance it asks, in
+order, for a name, the directory that will hold its database, the namespaces
+whose repositories should use it, and then its server URL and token. Every
+prompt states the accepted format and how to skip it. It finishes by verifying
+that the shim wins in `PATH`, reading the configuration it just wrote back with
+the router's own parser, and running the doctor.
 
 Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
-are per person; this repository ships none.
+are per person; this repository ships none. Credentials go into that instance's
+`cloud.json` with mode 0600, and are never echoed or logged.
+
+### What it refuses
+
+Input that could only fail later is rejected at the prompt, and it asks again:
+
+| Answer | Why it is refused |
+|---|---|
+| `https://github.com/org` as a namespace | the scheme is not part of a normalized remote; it suggests `github.com/org` |
+| `github.com/org/repo.git` | same, without the `.git`; a prefix with it can never match |
+| `github.com/org/repo/extra` | a namespace stops at the owner |
+| `http://…` as a server URL | Engram refuses to send a bearer token unencrypted, so it could never sync |
+| a data directory that exists as a file, or whose parent is not writable | caught here rather than several steps later, after the token has been typed |
+
+### Re-running it
+
+Over an existing configuration it shows what is there and offers to keep it,
+add an instance, modify one, or start over. Modifying one lists its current
+namespaces and adds to them: type a new one to append it, or `-<namespace>` to
+drop it. Nothing has to be retyped, instances you are not touching are never
+re-asked for credentials, and the previous `router.json` is backed up beside
+itself.
+
+If the configuration it writes cannot be parsed back, the backup is restored
+and the install stops rather than leaving a file the router cannot read.
 
 ## How many instances
 
@@ -258,6 +285,20 @@ engram-where     # where does THIS repository sync, and why
 engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
 engram-migrate   # move a repository's memories between instances
 ```
+
+## Not supported
+
+**Windows.** Engram itself ships native Windows binaries, so the engine is not
+the obstacle — this tool is. A shim cannot be a file without an extension there,
+since PATH resolves through `PATHEXT`, and it is unclear whether a `.cmd` would
+resolve in a `CreateProcess` call without a shell, which is how an MCP client
+spawns it. Worse, `chmod 0600` is a silent no-op on Windows, so the protection
+on `cloud.json` would appear to be applied and would not be.
+
+Porting it would mean a second implementation that has to behave identically
+forever. If it is ever done, the core belongs in Go rather than PowerShell:
+a real `.exe` resolves everywhere, and one codebase can handle both permission
+models.
 
 ## Uninstalling
 
