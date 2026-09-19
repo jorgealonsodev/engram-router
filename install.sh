@@ -562,6 +562,19 @@ EOF
 # it verbatim would leave every repository unmatched, so the real file is
 # generated here and the rules are asked for.
 # ---------------------------------------------------------------------------
+# Escapes a value for inclusion in a JSON string. Backslash first, then the
+# quote, or the backslashes added by the second pass would be escaped again.
+# Without this a namespace or a data directory containing a double quote —
+# legal in a Linux path — produced a file that reported success and then
+# failed to parse, which is the quiet kind of breakage this tool exists to
+# avoid.
+json_escape() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '%s' "$v"
+}
+
 write_router_config() {
     section "Reglas de enrutado"
 
@@ -571,14 +584,14 @@ write_router_config() {
     for i in "${!INSTANCES_TO_PROVISION[@]}"; do
         name="${INSTANCES_TO_PROVISION[$i]}"
         for prefix in ${INSTANCE_NS[$i]}; do
-            rule_lines+=("    { \"prefix\": \"$prefix\", \"instance\": \"$name\" }")
+            rule_lines+=("    { \"prefix\": \"$(json_escape "$prefix")\", \"instance\": \"$(json_escape "$name")\" }")
         done
     done
 
     for i in "${!INSTANCES_TO_PROVISION[@]}"; do
         name="${INSTANCES_TO_PROVISION[$i]}"
         dir="${INSTANCE_DIRS[$i]}"
-        instance_lines+=("    \"$name\": { \"data_dir\": \"$dir\" }")
+        instance_lines+=("    \"$(json_escape "$name")\": { \"data_dir\": \"$(json_escape "$dir")\" }")
     done
 
     # Values are emitted with %s so a "%" inside a namespace cannot be read as
