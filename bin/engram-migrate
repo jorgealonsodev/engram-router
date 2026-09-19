@@ -19,7 +19,7 @@ set -euo pipefail
 CONFIG_DIR="${ENGRAM_ROUTER_CONFIG_DIR:-$HOME/.config/engram-router}"
 CONFIG_FILE="$CONFIG_DIR/router.json"
 
-FROM=""; TO=""; DRY_RUN=0; ASSUME_YES=0; KEEP_SOURCE=0
+FROM=""; TO=""; DRY_RUN=0; ASSUME_YES=0; KEEP_SOURCE=0; CLEAN_CHUNKS=0
 
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n[%s] %s\n' "$1" "$2"; }
@@ -35,6 +35,9 @@ Ejecútelo DENTRO del repositorio que quiere migrar.
   --to <nombre>            Instancia destino.
   --dry-run                Muestra el plan y no cambia nada.
   --keep-source-enrolled   No desenrola en origen (seguirá replicando allí).
+  --clean-chunks           Borra los chunks exportados al terminar.
+                           IRREVERSIBLE: el origen no los regenera, así que
+                           esta migración ya no se podrá repetir.
   --yes                    No pedir confirmación.
 USAGE
 }
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --to)   TO="${2:-}";   shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --keep-source-enrolled) KEEP_SOURCE=1; shift ;;
+        --clean-chunks) CLEAN_CHUNKS=1; shift ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'Opción desconocida: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -137,11 +141,9 @@ fi
 step 1 "Exportando desde '$FROM'"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) engram sync"
-    exported="?"
 else
     out="$(run_in "$FROM_DIR" sync 2>&1)"
     printf '%s\n' "$out" | sed 's/^/  /'
-    exported="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*Observations:[[:space:]]*//p' | head -1)"
     [[ -d .engram/chunks ]] || die "el export no creó .engram/chunks/."
 fi
 
@@ -156,15 +158,34 @@ else
     out="$(run_in "$TO_DIR" sync --import 2>&1)"
     printf '%s\n' "$out" | sed 's/^/  /'
     imported="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*Observations:[[:space:]]*//p' | head -1)"
+    printf '%s' "$out" | grep -q 'No new chunks to import' &&
+        say "ya estaba importado (reejecución): se continúa."
 
     step 3 "Comprobando las cuentas"
-    if printf '%s' "$out" | grep -q 'No new chunks to import'; then
-        say "ya estaba importado (reejecución): se continúa."
-    elif [[ -n "$exported" && -n "$imported" && "$exported" == "$imported" ]]; then
-        say "exportadas $exported = importadas $imported"
-    else
-        die "las cuentas no cuadran (exportadas='${exported:-?}' importadas='${imported:-?}').
+    # The two CLI numbers are NOT comparable: export reports observations
+    # including soft-deleted ones, import reports only the live ones it
+    # materialized. Measured on a real 1139-observation project, export said
+    # 1147 and import said 1139 — an 8-row gap that was entirely soft-deleted
+    # rows, correctly not carried over. Comparing them aborts a perfectly good
+    # migration, so count live rows on both sides instead.
+    if command -v sqlite3 >/dev/null 2>&1; then
+        src_live="$(sqlite3 "$FROM_DIR/engram.db" \
+            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL;" 2>/dev/null || echo "")"
+        dst_live="$(sqlite3 "$TO_DIR/engram.db" \
+            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL;" 2>/dev/null || echo "")"
+        if [[ -n "$src_live" && -n "$dst_live" ]]; then
+            say "vivas en origen: $src_live · vivas en destino: $dst_live"
+            [[ "$dst_live" -ge "$src_live" ]] || die \
+"faltan observaciones en el destino ($dst_live de $src_live).
         No se ha enrolado ni empujado nada. El origen está intacto."
+        else
+            say "no se pudieron leer las bases de datos: se omite el conteo exacto."
+        fi
+    else
+        say "sqlite3 no disponible: se omite el conteo exacto."
+        printf '%s' "$out" | grep -q 'No new chunks to import' ||
+            [[ "${imported:-0}" -gt 0 ]] ||
+            die "el import no trajo observaciones. El origen está intacto."
     fi
 fi
 
@@ -202,19 +223,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7 — the chunks are memories in plain form. Engram suggests committing
-# them; that would publish their contents to everyone with repository access.
+# Step 7 — the chunks are memories in portable form and Engram suggests
+# committing them, which would publish their contents to everyone with
+# repository access. Ignore them; do NOT delete them.
+#
+# Deleting makes the migration unrepeatable. The source records every chunk it
+# ever produced in sync_chunks and will not regenerate one: a re-run reports
+# "Nothing new to sync" while the destination stays empty. The only way back is
+# `engram sync --all`, which exports every project at once — measured at 6594
+# observations where one project needed 1139.
 # ---------------------------------------------------------------------------
-step 7 "Limpiando los chunks exportados"
+step 7 "Protegiendo los chunks exportados"
 if [[ $DRY_RUN -eq 1 ]]; then
-    say "(simulado) rm -rf .engram/chunks .engram/manifest.json"
-else
+    say "(simulado) añadir .engram/chunks/ a .gitignore"
+elif [[ $CLEAN_CHUNKS -eq 1 ]]; then
     rm -rf .engram/chunks .engram/manifest.json
-    say "borrados (contenían sus memorias: nunca deben commitearse)."
-    [[ -f .engram/config.json ]] && say "conservado .engram/config.json"
+    say "borrados por --clean-chunks."
+    say "ATENCIÓN: esta migración ya no se puede repetir para '$PROJECT'."
+else
+    gi=".gitignore"
+    if ! { [[ -f "$gi" ]] && grep -qE '^\.engram/chunks/?$' "$gi"; }; then
+        # Read the size before opening the file for append, not inside it.
+        needs_blank=0
+        [[ -s "$gi" ]] && needs_blank=1
+        { [[ $needs_blank -eq 1 ]] && printf '\n'
+          printf '# Engram memories in portable form — never commit these.\n.engram/chunks/\n'
+        } >> "$gi"
+        say "añadido '.engram/chunks/' a $gi"
+    else
+        say "'.engram/chunks/' ya estaba en $gi"
+    fi
+    say "los chunks se conservan: borrarlos impediría repetir esta migración."
 fi
 
 printf '\n=== Hecho ===\n'
 say "'$PROJECT' está ahora en '$TO' y replica a $dest_server."
 [[ $KEEP_SOURCE -eq 0 ]] && say "Las memorias antiguas siguen en '$FROM' y en el cloud al que ya se subieron."
 say "Lo ya replicado a un cloud anterior NO se borra: eso es una decisión suya."
+[[ $CLEAN_CHUNKS -eq 0 ]] && say "Los chunks quedan en .engram/chunks/, ignorados por git."

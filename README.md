@@ -215,6 +215,17 @@ If any step fails, nothing after it runs: the source keeps its memories and its
 enrollment, and the exported chunks stay on disk. Import is idempotent, so
 fixing the problem and re-running resumes rather than duplicating.
 
+The exported chunks are kept and added to the repository's `.gitignore`. They
+are not deleted, because the source records every chunk it ever produced and
+will not regenerate one: deleting them leaves a re-run reporting "Nothing new
+to sync" while the destination stays empty, and the only way back is
+`engram sync --all`, which exports every project at once. `--clean-chunks`
+removes them anyway, and says that the migration becomes unrepeatable.
+
+**The destination must be HTTPS.** Engram refuses to send a bearer token over
+plain HTTP (`bearer token requires an HTTPS remote URL`), so a cloud served on
+`http://` cannot be pushed to with a token at all.
+
 Two things it deliberately does not do. It does not delete the source memories
 — `--keep-source-enrolled` even leaves them replicating. And it cannot remove
 what a previous cloud already received; that is your decision, not a routing
