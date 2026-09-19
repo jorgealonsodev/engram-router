@@ -22,6 +22,21 @@ _self_dir() {
     cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
+# The shim exports ENGRAM_DATA_DIR for the current repository unconditionally,
+# so asking "engram" would answer about whichever instance this directory
+# routes to, not the one being checked. Every instance would report the same
+# destination — which it did, until this existed.
+_real_engram() {
+    local stripped entry
+    stripped=""
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        [[ "$(cd "$entry" 2>/dev/null && pwd)" == "$SHIM_DIR" ]] && continue
+        stripped="${stripped:+$stripped:}$entry"
+    done < <(printf '%s' "${PATH:-}" | tr ':' '\n')
+    PATH="$stripped" command -v engram 2>/dev/null
+}
+
 _find_router_lib() {
     local self_dir installed_lib sibling_lib
     self_dir="$(_self_dir)"
@@ -172,8 +187,39 @@ check_instance_destinations() {
         perms="$(stat -c '%a' "$cloud_json" 2>/dev/null || echo '?')"
         if [[ "$perms" != "600" ]]; then
             fail "$name: cloud.json tiene permisos $perms, se esperaba 600 ($cloud_json)"
+            continue
+        fi
+
+        # Ask Engram instead of inferring. This check used to print
+        # "Server source: cloud.json" after merely finding the file with the
+        # right mode and a clean environment — an assertion, not a reading. A
+        # future Engram that stopped honouring cloud.json would have kept
+        # passing, which is precisely the drift the version check warns about.
+        #
+        # Only asked when the instance already has a database: the query would
+        # otherwise create one, and this tool never writes to an Engram store.
+        if [[ ! -e "$data_dir/engram.db" ]]; then
+            warn "$name: cloud.json correcto (600), pero la instancia aún no tiene base de datos; no se consulta a Engram para no crearla"
+            continue
+        fi
+
+        local status source server real
+        real="$(_real_engram)"
+        if [[ -z "$real" ]]; then
+            warn "$name: cloud.json correcto (600), pero no se encuentra el binario real de Engram para confirmarlo"
+            continue
+        fi
+        status="$(env -u ENGRAM_CLOUD_SERVER -u ENGRAM_CLOUD_TOKEN -u ENGRAM_CLOUD_AUTOSYNC \
+                  ENGRAM_DATA_DIR="$data_dir" "$real" cloud status 2>/dev/null || true)"
+        source="$(printf '%s' "$status" | sed -n 's/^Server source:[[:space:]]*//p' | head -1)"
+        server="$(printf '%s' "$status" | sed -n 's/^Server:[[:space:]]*//p' | head -1)"
+
+        if [[ -z "$source" ]]; then
+            fail "$name: Engram no informa de 'Server source'. O falló la consulta, o el formato de salida cambió y este diagnóstico ya no puede leerlo"
+        elif [[ "$source" != "cloud.json" ]]; then
+            fail "$name: Engram resuelve desde '$source', no desde cloud.json — el destino real sería $server"
         else
-            pass "$name: Server source: cloud.json (permisos 600, $cloud_json)"
+            pass "$name: Engram confirma Server source: cloud.json -> ${server:-?} (permisos 600)"
         fi
     done
 }
