@@ -108,13 +108,6 @@ install_files() {
     ln -sf "$PREFIX_BIN/engram-router" "$PREFIX_BIN/engram-where"
     install -m 0644 "$SCRIPT_DIR/lib/router.sh" "$LIB_DIR/router.sh"
 
-    if [[ -e "$CONFIG_FILE" ]]; then
-        say "Ya existe $CONFIG_FILE — se conserva sin modificar."
-    else
-        install -m 0644 "$SCRIPT_DIR/config/router.example.json" "$CONFIG_FILE"
-        say "Reglas por defecto instaladas en $CONFIG_FILE (edítelas si hace falta)."
-    fi
-
     say "Binarios instalados en $PREFIX_BIN"
 }
 
@@ -183,9 +176,11 @@ ask_instances() {
     say "así que una búsqueda en una no ve las memorias de las otras."
 
     INSTANCES_TO_PROVISION=()
+    INSTANCE_DIRS=()
 
     if [[ ! -t 0 ]]; then
         INSTANCES_TO_PROVISION=(work)
+        INSTANCE_DIRS=("$HOME/.local/share/engram-work")
         say "Entrada no interactiva: se instala solo la instancia 'work' por defecto."
         return
     fi
@@ -205,6 +200,7 @@ ask_instances() {
             # First prompt defaults to "work"; later ones end the loop.
             if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
                 INSTANCES_TO_PROVISION=(work)
+                INSTANCE_DIRS=("$HOME/.local/share/engram-work")
             fi
             break
         fi
@@ -223,8 +219,21 @@ ask_instances() {
             continue
         fi
 
+        local default_dir="$HOME/.local/share/engram-$name" dir=""
+        read -r -p "  Directorio de datos [$default_dir]: " dir || true
+        dir="${dir:-$default_dir}"
+        dir="${dir/#\~/$HOME}"
+
+        # Reusing an existing installation root keeps its memories, its
+        # enrollments and its sync cursors: creating a fresh directory instead
+        # would silently start from an empty database.
+        if [[ -e "$dir/engram.db" ]]; then
+            say "  Reutiliza una instalación existente: conserva memorias y enrolamientos."
+        fi
+
         INSTANCES_TO_PROVISION+=("$name")
-        say "Añadida instancia '$name' (datos en ~/.local/share/engram-$name)."
+        INSTANCE_DIRS+=("$dir")
+        say "Añadida instancia '$name' -> $dir"
     done
 
     say "Instancias a aprovisionar: ${INSTANCES_TO_PROVISION[*]}"
@@ -236,13 +245,17 @@ ask_instances() {
 # ---------------------------------------------------------------------------
 provision_instance() {
     local name="$1"
-    local data_dir="$HOME/.local/share/engram-$name"
+    local data_dir="$2"
     local cloud_json="$data_dir/cloud.json"
 
     section "Aprovisionando instancia: $name"
 
-    mkdir -p "$data_dir"
-    chmod 0700 "$data_dir"
+    if [[ -d "$data_dir" ]]; then
+        say "Usando el directorio existente $data_dir (permisos sin tocar)."
+    else
+        mkdir -p "$data_dir"
+        chmod 0700 "$data_dir"
+    fi
 
     if [[ -e "$cloud_json" ]]; then
         say "Ya existe $cloud_json — se conserva sin modificar (re-ejecución idempotente)."
@@ -305,6 +318,76 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Write router.json from the instances actually provisioned.
+#
+# The shipped config/router.example.json is an example: its rules name
+# placeholder namespaces and its instances name placeholder paths. Installing
+# it verbatim would leave every repository unmatched, so the real file is
+# generated here and the rules are asked for.
+# ---------------------------------------------------------------------------
+write_router_config() {
+    section "Reglas de enrutado"
+
+    if [[ -e "$CONFIG_FILE" ]]; then
+        say "Ya existe $CONFIG_FILE — se conserva sin modificar."
+        return
+    fi
+
+    local name dir idx=0 prefixes prefix
+    local -a rule_lines=() instance_lines=()
+
+    for name in "${INSTANCES_TO_PROVISION[@]}"; do
+        if [[ -t 0 ]]; then
+            say "Namespaces cuyos repositorios van a '$name'."
+            say "Formato: host[:puerto]/propietario, separados por espacios."
+            say "Ejemplo: github.com/mi-org gitlab.miempresa.com:8443/mi-usuario"
+            read -r -p "  Namespaces de '$name' (Enter para ninguno): " prefixes || true
+        else
+            prefixes=""
+        fi
+        for prefix in $prefixes; do
+            rule_lines+=("    { \"prefix\": \"$prefix\", \"instance\": \"$name\" }")
+        done
+    done
+
+    for name in "${INSTANCES_TO_PROVISION[@]}"; do
+        dir="${INSTANCE_DIRS[$idx]}"
+        instance_lines+=("    \"$name\": { \"data_dir\": \"$dir\" }")
+        idx=$((idx + 1))
+    done
+
+    # Values are emitted with %s so a "%" inside a namespace cannot be read as
+    # a format directive, and commas are placed between entries only.
+    emit_json_array() {
+        # `local -n arr="$1" i` would make i a nameref too, and assigning it
+        # a numeric index fails with "not a valid identifier".
+        local -n arr="$1"
+        local i
+        for i in "${!arr[@]}"; do
+            printf '%s' "${arr[$i]}"
+            [[ $i -lt $(( ${#arr[@]} - 1 )) ]] && printf ','
+            printf '\n'
+        done
+    }
+
+    umask 022
+    {
+        printf '{\n  "rules": [\n'
+        emit_json_array rule_lines
+        printf '  ],\n  "instances": {\n'
+        emit_json_array instance_lines
+        printf '  }\n}\n'
+    } > "$CONFIG_FILE"
+    chmod 0644 "$CONFIG_FILE"
+
+    say "Escrito $CONFIG_FILE"
+    if [[ -z "$rules" ]]; then
+        say "SIN REGLAS: ningún repositorio se enrutará y toda operación de cloud"
+        say "            será rechazada hasta que las añada."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Step 6 — verify the shim actually wins in PATH.
 # ---------------------------------------------------------------------------
 verify_path_precedence() {
@@ -335,10 +418,14 @@ main() {
     install_systemd_unit
     ask_instances
 
+    local idx=0
     for inst in "${INSTANCES_TO_PROVISION[@]}"; do
-        provision_instance "$inst"
+        provision_instance "$inst" "${INSTANCE_DIRS[$idx]}"
         write_instance_autosync_env "$inst"
+        idx=$((idx + 1))
     done
+
+    write_router_config
 
     section "Aviso final"
     say "Si ya tenía una instalación de Engram de instancia única en uso, es"
