@@ -11,3 +11,7 @@ config/router.json
 # Local tooling artifacts
 .atl/
 .codegraph/
+
+# Screenshots dropped in the repo root — this repository is public.
+/*.png
+/*.jpg

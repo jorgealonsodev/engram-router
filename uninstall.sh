@@ -86,6 +86,7 @@ COMPONENTS=(
     "$PREFIX_BIN/engram"
     "$PREFIX_BIN/engram-router"
     "$PREFIX_BIN/engram-doctor"
+    "$PREFIX_BIN/engram-migrate"
     "$PREFIX_BIN/engram-where"
     "$LIB_DIR"
     "$CONFIG_DIR"

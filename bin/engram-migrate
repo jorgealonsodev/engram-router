@@ -162,21 +162,22 @@ else
         say "ya estaba importado (reejecución): se continúa."
 
     step 3 "Comprobando las cuentas"
-    # The two CLI numbers are NOT comparable: export reports observations
-    # including soft-deleted ones, import reports only the live ones it
-    # materialized. Measured on a real 1139-observation project, export said
-    # 1147 and import said 1139 — an 8-row gap that was entirely soft-deleted
-    # rows, correctly not carried over. Comparing them aborts a perfectly good
-    # migration, so count live rows on both sides instead.
+    # Count what a project-scoped export actually carries, which is narrower
+    # than "every row of this project" in two ways, each of which produced a
+    # false abort before it was accounted for:
+    #   - soft-deleted rows are exported but not materialized (1147 vs 1139)
+    #   - scope='personal' rows belong to the user, not the project, so they
+    #     stay behind by design (148 vs 147)
+    # Comparing live project-scoped rows on both sides matches the export.
     if command -v sqlite3 >/dev/null 2>&1; then
         src_live="$(sqlite3 "$FROM_DIR/engram.db" \
-            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL;" 2>/dev/null || echo "")"
+            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL AND scope='project';" 2>/dev/null || echo "")"
         dst_live="$(sqlite3 "$TO_DIR/engram.db" \
-            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL;" 2>/dev/null || echo "")"
+            "SELECT COUNT(*) FROM observations WHERE LOWER(project)=LOWER('$PROJECT') AND deleted_at IS NULL AND scope='project';" 2>/dev/null || echo "")"
         if [[ -n "$src_live" && -n "$dst_live" ]]; then
-            say "vivas en origen: $src_live · vivas en destino: $dst_live"
+            say "de proyecto en origen: $src_live · en destino: $dst_live"
             [[ "$dst_live" -ge "$src_live" ]] || die \
-"faltan observaciones en el destino ($dst_live de $src_live).
+"faltan observaciones de proyecto en el destino ($dst_live de $src_live).
         No se ha enrolado ni empujado nada. El origen está intacto."
         else
             say "no se pudieron leer las bases de datos: se omite el conteo exacto."
