@@ -122,9 +122,15 @@ cd engram-router
 ./install.sh
 ```
 
+Re-running the installer over an existing configuration shows it and offers to
+keep it, add an instance, modify one, or start over. Keeping or adding never
+re-asks for the credentials of instances you are not touching, and the previous
+`router.json` is backed up beside itself.
+
 The installer is interactive and idempotent. It asks for instance names one at
 a time — press Enter on the first prompt to accept a single `work` instance, or
-name as many as you need. For each one it prompts for the server URL and token,
+name as many as you need. For each one it prompts for the server URL and token, then for its namespaces
+one per line until you press Enter,
 writes them to that instance's `cloud.json` with mode 0600, and never echoes or
 logs the token. It then verifies the shim actually wins in `PATH` and runs the
 doctor.

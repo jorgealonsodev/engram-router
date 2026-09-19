@@ -192,21 +192,229 @@ install_systemd_unit() {
 # ---------------------------------------------------------------------------
 INSTANCE_NAME_RE='^[a-z0-9][a-z0-9-]{0,31}$'
 
+# Namespaces are asked one per line, like instance names, instead of one
+# space-separated line. A single line gives no second chance: a typo or a
+# forgotten entry can only be fixed by editing router.json by hand afterwards,
+# which is exactly what happened on the first real install.
+ask_namespaces_for() {
+    # Every prompt and message here goes to stderr on purpose: this function
+    # returns the collected namespaces on stdout, so anything else printed
+    # there would be captured by the caller and written into router.json as
+    # rules. That is exactly what happened before this redirect existed.
+    local name="$1" current="$2"
+    local -a collected=()
+    local ns=""
+
+    if [[ -n "$current" ]]; then
+        say >&2 "Namespaces actuales de '$name': $current"
+        say >&2 "Enter en el primero los conserva; escribir alguno los reemplaza."
+    fi
+
+    say >&2 "Namespaces cuyos repositorios van a '$name', uno por línea."
+    say >&2 "Formato: host[:puerto]/propietario   Ej: github.com/mi-org"
+
+    while :; do
+        local prompt="  Namespace de '$name'"
+        if [[ ${#collected[@]} -eq 0 ]]; then
+            prompt+=" (Enter para "
+            [[ -n "$current" ]] && prompt+="conservar los actuales): " || prompt+="ninguno): "
+        else
+            prompt+=" (Enter para terminar): "
+        fi
+
+        read -r -p "$prompt" ns || true
+
+        if [[ -z "$ns" ]]; then
+            if [[ ${#collected[@]} -eq 0 && -n "$current" ]]; then
+                printf '%s' "$current"
+                return
+            fi
+            break
+        fi
+
+        local dup="" seen=""
+        for seen in ${collected[@]+"${collected[@]}"}; do
+            [[ "$seen" == "$ns" ]] && dup=1
+        done
+        if [[ -n "$dup" ]]; then
+            say >&2 "  '$ns' ya está en la lista."
+            continue
+        fi
+
+        collected+=("$ns")
+        say >&2 "  añadido: $ns"
+    done
+
+    printf '%s' "${collected[*]-}"
+}
+
+# Asks for one instance's directory, credentials and namespaces. Used both for
+# a brand-new instance and for modifying one that already exists.
+ask_one_instance() {
+    local name="$1" cur_dir="${2:-}" cur_ns="${3:-}"
+
+    local default_dir="${cur_dir:-$HOME/.local/share/engram-$name}" dir=""
+    read -r -p "  Directorio de datos [$default_dir]: " dir || true
+    dir="${dir:-$default_dir}"
+    dir="${dir/#\~/$HOME}"
+
+    # Reusing an existing installation root keeps its memories, its enrollments
+    # and its sync cursors; a fresh directory silently starts from an empty
+    # database while the old one sits there untouched.
+    if [[ -e "$dir/engram.db" ]]; then
+        say "  Reutiliza una instalación existente: conserva memorias y enrolamientos."
+    fi
+
+    ASKED_DIR="$dir"
+    ASKED_NS="$(ask_namespaces_for "$name" "$cur_ns")"
+}
+
+# Reads an existing router.json into INSTALLED_* arrays. Reuses the shared
+# library rather than parsing JSON a second way.
+load_existing_config() {
+    INSTALLED_NAMES=()
+    INSTALLED_DIRS=()
+    INSTALLED_NS=()
+    [[ -r "$CONFIG_FILE" ]] || return 1
+
+    # shellcheck source=lib/router.sh
+    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh"
+    router_load_config "$CONFIG_FILE" || return 1
+    [[ ${#INSTANCE_NAMES[@]} -gt 0 ]] || return 1
+
+    local n i ns
+    for n in "${INSTANCE_NAMES[@]}"; do
+        ns=""
+        for i in "${!RULE_PREFIXES[@]}"; do
+            [[ "${RULE_INSTANCES[$i]}" == "$n" ]] && ns+="${ns:+ }${RULE_PREFIXES[$i]}"
+        done
+        INSTALLED_NAMES+=("$n")
+        INSTALLED_DIRS+=("${INSTANCE_DATA_DIR[$n]:-}")
+        INSTALLED_NS+=("$ns")
+    done
+    return 0
+}
+
+show_existing_config() {
+    local i
+    say "Configuración existente en $CONFIG_FILE:"
+    for i in "${!INSTALLED_NAMES[@]}"; do
+        printf '  %-16s -> %s\n' "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}"
+        printf '  %-16s    %s\n' "" "${INSTALLED_NS[$i]:-(sin namespaces)}"
+    done
+}
+
+# Adds a name/dir/namespaces triple to the set that will be written out.
+push_instance() {
+    INSTANCES_TO_PROVISION+=("$1")
+    INSTANCE_DIRS+=("$2")
+    INSTANCE_NS+=("$3")
+}
+
+read_new_name() {
+    local prompt="$1" name=""
+    while :; do
+        read -r -p "$prompt" name || true
+        [[ -z "$name" ]] && { printf ''; return 1; }
+        if [[ ! "$name" =~ $INSTANCE_NAME_RE ]]; then
+            say "Nombre inválido: use minúsculas, dígitos y guiones (máx. 32). Ej: work, cliente-acme"
+            continue
+        fi
+        local seen=""
+        for seen in ${INSTANCES_TO_PROVISION[@]+"${INSTANCES_TO_PROVISION[@]}"}; do
+            [[ "$seen" == "$name" ]] && { say "'$name' ya está en la lista."; continue 2; }
+        done
+        printf '%s' "$name"
+        return 0
+    done
+}
+
 ask_instances() {
     section "Selección de instancias"
-    say "Cree UNA instancia por cada Engram Cloud al que sincronice."
-    say "No cree instancias por contexto de trabajo: no comparten base de datos,"
-    say "así que una búsqueda en una no ve las memorias de las otras."
 
     INSTANCES_TO_PROVISION=()
     INSTANCE_DIRS=()
+    INSTANCE_NS=()
+    REPROVISION=()
 
     if [[ ! -t 0 ]]; then
-        INSTANCES_TO_PROVISION=(work)
-        INSTANCE_DIRS=("$HOME/.local/share/engram-work")
-        say "Entrada no interactiva: se instala solo la instancia 'work' por defecto."
+        if load_existing_config; then
+            local i
+            for i in "${!INSTALLED_NAMES[@]}"; do
+                push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+            done
+            say "Entrada no interactiva: se conserva la configuración existente."
+        else
+            push_instance work "$HOME/.local/share/engram-work" ""
+            say "Entrada no interactiva: se instala solo la instancia 'work' por defecto."
+        fi
         return
     fi
+
+    if load_existing_config; then
+        show_existing_config
+        say ""
+        say "  1) Conservarla sin cambios"
+        say "  2) Añadir una instancia nueva"
+        say "  3) Modificar una existente"
+        say "  4) Empezar de cero"
+        local choice=""
+        read -r -p "Opción [1]: " choice || true
+        choice="${choice:-1}"
+
+        local i
+        case "$choice" in
+            1)
+                for i in "${!INSTALLED_NAMES[@]}"; do
+                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                done
+                say "Configuración conservada."
+                return
+                ;;
+            2)
+                for i in "${!INSTALLED_NAMES[@]}"; do
+                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                done
+                local name
+                while name="$(read_new_name "Nombre de la instancia nueva (Enter para terminar): ")"; do
+                    [[ -z "$name" ]] && break
+                    ask_one_instance "$name"
+                    push_instance "$name" "$ASKED_DIR" "$ASKED_NS"
+                    REPROVISION+=("$name")
+                    say "Añadida instancia '$name' -> $ASKED_DIR"
+                done
+                return
+                ;;
+            3)
+                local target=""
+                read -r -p "¿Cuál desea modificar? (${INSTALLED_NAMES[*]}): " target || true
+                for i in "${!INSTALLED_NAMES[@]}"; do
+                    if [[ "${INSTALLED_NAMES[$i]}" == "$target" ]]; then
+                        ask_one_instance "$target" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                        push_instance "$target" "$ASKED_DIR" "$ASKED_NS"
+                        REPROVISION+=("$target")
+                    else
+                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                    fi
+                done
+                if [[ ${#REPROVISION[@]} -eq 0 ]]; then
+                    say "'$target' no existe: no se ha modificado nada."
+                fi
+                return
+                ;;
+            4) say "Se descarta la configuración anterior." ;;
+            *) say "Opción no reconocida: se conserva la configuración."
+               for i in "${!INSTALLED_NAMES[@]}"; do
+                   push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+               done
+               return
+               ;;
+        esac
+    fi
+
+    say "Cree UNA instancia por cada Engram Cloud al que sincronice."
+    say "No cree instancias por contexto de trabajo: no comparten base de datos,"
+    say "así que una búsqueda en una no ve las memorias de las otras."
 
     local name=""
     while :; do
@@ -220,10 +428,10 @@ ask_instances() {
         read -r -p "$prompt" name || true
 
         if [[ -z "$name" ]]; then
-            # First prompt defaults to "work"; later ones end the loop.
             if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
-                INSTANCES_TO_PROVISION=(work)
-                INSTANCE_DIRS=("$HOME/.local/share/engram-work")
+                ask_one_instance work
+                push_instance work "$ASKED_DIR" "$ASKED_NS"
+                REPROVISION+=(work)
             fi
             break
         fi
@@ -242,24 +450,13 @@ ask_instances() {
             continue
         fi
 
-        local default_dir="$HOME/.local/share/engram-$name" dir=""
-        read -r -p "  Directorio de datos [$default_dir]: " dir || true
-        dir="${dir:-$default_dir}"
-        dir="${dir/#\~/$HOME}"
-
-        # Reusing an existing installation root keeps its memories, its
-        # enrollments and its sync cursors: creating a fresh directory instead
-        # would silently start from an empty database.
-        if [[ -e "$dir/engram.db" ]]; then
-            say "  Reutiliza una instalación existente: conserva memorias y enrolamientos."
-        fi
-
-        INSTANCES_TO_PROVISION+=("$name")
-        INSTANCE_DIRS+=("$dir")
-        say "Añadida instancia '$name' -> $dir"
+        ask_one_instance "$name"
+        push_instance "$name" "$ASKED_DIR" "$ASKED_NS"
+        REPROVISION+=("$name")
+        say "Añadida instancia '$name' -> $ASKED_DIR"
     done
 
-    say "Instancias a aprovisionar: ${INSTANCES_TO_PROVISION[*]}"
+    say "Instancias configuradas: ${INSTANCES_TO_PROVISION[*]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -351,39 +548,25 @@ EOF
 write_router_config() {
     section "Reglas de enrutado"
 
-    if [[ -e "$CONFIG_FILE" ]]; then
-        say "Ya existe $CONFIG_FILE — se conserva sin modificar."
-        return
-    fi
-
-    local name dir idx=0 prefixes prefix
     local -a rule_lines=() instance_lines=()
+    local i name dir prefix
 
-    for name in "${INSTANCES_TO_PROVISION[@]}"; do
-        if [[ -t 0 ]]; then
-            say "Namespaces cuyos repositorios van a '$name'."
-            say "Formato: host[:puerto]/propietario, separados por espacios."
-            say "Ejemplo: github.com/mi-org gitlab.miempresa.com:8443/mi-usuario"
-            read -r -p "  Namespaces de '$name' (Enter para ninguno): " prefixes || true
-        else
-            prefixes=""
-        fi
-        for prefix in $prefixes; do
+    for i in "${!INSTANCES_TO_PROVISION[@]}"; do
+        name="${INSTANCES_TO_PROVISION[$i]}"
+        for prefix in ${INSTANCE_NS[$i]}; do
             rule_lines+=("    { \"prefix\": \"$prefix\", \"instance\": \"$name\" }")
         done
     done
 
-    for name in "${INSTANCES_TO_PROVISION[@]}"; do
-        dir="${INSTANCE_DIRS[$idx]}"
+    for i in "${!INSTANCES_TO_PROVISION[@]}"; do
+        name="${INSTANCES_TO_PROVISION[$i]}"
+        dir="${INSTANCE_DIRS[$i]}"
         instance_lines+=("    \"$name\": { \"data_dir\": \"$dir\" }")
-        idx=$((idx + 1))
     done
 
     # Values are emitted with %s so a "%" inside a namespace cannot be read as
     # a format directive, and commas are placed between entries only.
     emit_json_array() {
-        # `local -n arr="$1" i` would make i a nameref too, and assigning it
-        # a numeric index fails with "not a valid identifier".
         local -n arr="$1"
         local i
         for i in "${!arr[@]}"; do
@@ -392,6 +575,14 @@ write_router_config() {
             printf '\n'
         done
     }
+
+    # An existing config is backed up rather than refused: refusing would make
+    # the installer unable to add or change an instance, which is its job.
+    mkdir -p "$CONFIG_DIR"
+    if [[ -e "$CONFIG_FILE" ]]; then
+        cp -p "$CONFIG_FILE" "$CONFIG_FILE.bak.$(date +%Y%m%d_%H%M%S)"
+        say "Copia de la configuración anterior junto a $CONFIG_FILE"
+    fi
 
     umask 022
     {
@@ -403,7 +594,7 @@ write_router_config() {
     } > "$CONFIG_FILE"
     chmod 0644 "$CONFIG_FILE"
 
-    say "Escrito $CONFIG_FILE"
+    say "Escrito $CONFIG_FILE (${#rule_lines[@]} regla(s), ${#instance_lines[@]} instancia(s))"
     if [[ ${#rule_lines[@]} -eq 0 ]]; then
         say "SIN REGLAS: ningún repositorio se enrutará y toda operación de cloud"
         say "            será rechazada hasta que las añada."
@@ -441,10 +632,19 @@ main() {
     install_systemd_unit
     ask_instances
 
-    local idx=0
+    # Only instances the user just added or changed are provisioned: the ones
+    # kept from an existing config already have their credentials, and asking
+    # again would mean re-typing a token to change nothing.
+    local idx=0 inst touch
     for inst in "${INSTANCES_TO_PROVISION[@]}"; do
-        provision_instance "$inst" "${INSTANCE_DIRS[$idx]}"
-        write_instance_autosync_env "$inst"
+        touch=""
+        for name in ${REPROVISION[@]+"${REPROVISION[@]}"}; do
+            [[ "$name" == "$inst" ]] && touch=1
+        done
+        if [[ -n "$touch" ]]; then
+            provision_instance "$inst" "${INSTANCE_DIRS[$idx]}"
+            write_instance_autosync_env "$inst"
+        fi
         idx=$((idx + 1))
     done
 
