@@ -212,19 +212,29 @@ ask_namespaces_for() {
         collected+=("$existing")
     done
 
-    say >&2 "Namespaces de '$name', uno por línea."
+    say >&2 "Ahora, qué repositorios usarán '$name'."
+    say >&2 "Se decide por el remote de git: todo repositorio cuyo origin empiece"
+    say >&2 "por uno de estos prefijos irá a esta instancia. Uno por línea."
+    say >&2 "Formato: host[:puerto]/propietario"
+    say >&2 "Ejemplos: github.com/mi-organizacion   gitlab.miempresa.com:8443/mi-usuario"
     if [[ ${#collected[@]} -gt 0 ]]; then
+        say >&2 ""
+        say >&2 "Ya configurados para '$name':"
         local c
         for c in "${collected[@]}"; do
-            say >&2 "  actual: $c"
+            say >&2 "  - $c"
         done
-        say >&2 "Escriba uno nuevo para AÑADIRLO, o -<namespace> para quitarlo."
-    else
-        say >&2 "Formato: host[:puerto]/propietario   Ej: github.com/mi-org"
+        say >&2 "Escriba uno nuevo para AÑADIRLO. Para quitar uno, escríbalo con un"
+        say >&2 "guion delante, por ejemplo: -${collected[0]}"
     fi
 
     while :; do
-        local prompt="  Namespace de '$name' (Enter para terminar): "
+        local prompt
+        if [[ ${#collected[@]} -eq 0 ]]; then
+            prompt="  Prefijo, o Enter si '$name' no debe recibir ningún repositorio: "
+        else
+            prompt="  Otro prefijo, o Enter si ya no quiere más: "
+        fi
         read -r -p "$prompt" ns || true
         [[ -z "$ns" ]] && break
 
@@ -265,7 +275,10 @@ ask_one_instance() {
     local name="$1" cur_dir="${2:-}" cur_ns="${3:-}"
 
     local default_dir="${cur_dir:-$HOME/.local/share/engram-$name}" dir=""
-    read -r -p "  Directorio de datos [$default_dir]: " dir || true
+    say "  Carpeta donde '$name' guardará su base de datos."
+    say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
+    say "  instalación de Engram que ya exista para reutilizar sus memorias."
+    read -r -p "  Carpeta [Enter = $default_dir]: " dir || true
     dir="${dir:-$default_dir}"
     dir="${dir/#\~/$HOME}"
 
@@ -365,12 +378,12 @@ ask_instances() {
     if load_existing_config; then
         show_existing_config
         say ""
-        say "  1) Conservarla sin cambios"
+        say "  1) Conservarla sin cambios  (recomendado si solo quiere reinstalar)"
         say "  2) Añadir una instancia nueva"
-        say "  3) Modificar una existente"
-        say "  4) Empezar de cero"
+        say "  3) Modificar una existente  (cambiar su carpeta o sus namespaces)"
+        say "  4) Empezar de cero  (descarta lo de arriba y vuelve a preguntarlo todo)"
         local choice=""
-        read -r -p "Opción [1]: " choice || true
+        read -r -p "Escriba 1, 2, 3 o 4 — o pulse Enter para la opción 1: " choice || true
         choice="${choice:-1}"
 
         local i
@@ -387,7 +400,9 @@ ask_instances() {
                     push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
                 done
                 local name
-                while name="$(read_new_name "Nombre de la instancia nueva (Enter para terminar): ")"; do
+                say ""
+                say "Escriba el nombre de la instancia nueva (ej: cliente-acme)."
+                while name="$(read_new_name "  Nombre, o Enter si ya no quiere añadir más: ")"; do
                     [[ -z "$name" ]] && break
                     ask_one_instance "$name"
                     push_instance "$name" "$ASKED_DIR" "$ASKED_NS"
@@ -437,17 +452,20 @@ ask_instances() {
         esac
     fi
 
-    say "Cree UNA instancia por cada Engram Cloud al que sincronice."
-    say "No cree instancias por contexto de trabajo: no comparten base de datos,"
-    say "así que una búsqueda en una no ve las memorias de las otras."
+    say "Una INSTANCIA es una instalación de Engram independiente: su propia base"
+    say "de datos y su propio servidor de destino. Cree una por cada Engram Cloud"
+    say "al que sincronice, y no más: dos instancias no comparten memorias, así que"
+    say "una búsqueda en una no encuentra nada de la otra."
+    say ""
+    say "El nombre es suyo: sirve para referirse a ella (ej: work, personal, cliente-acme)."
 
     local name=""
     while :; do
-        local prompt="Nombre de la instancia"
+        local prompt
         if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
-            prompt+=" [work]: "
+            prompt="Nombre de la primera instancia (Enter para llamarla 'work'): "
         else
-            prompt+=" (Enter para terminar): "
+            prompt="Nombre de otra instancia, o Enter si ya no quiere más: "
         fi
 
         read -r -p "$prompt" name || true
@@ -518,17 +536,23 @@ provision_instance() {
     fi
 
     local server=""
-    read -r -p "URL del servidor Engram Cloud para '$name': " server || true
+    say "URL del Engram Cloud de '$name'. Debe empezar por https:// — Engram se"
+    say "niega a enviar el token por HTTP sin cifrar."
+    read -r -p "  URL (ej: https://engram.miempresa.com): " server || true
     if [[ -z "$server" ]]; then
-        say "URL vacía: se omite $name (puede volver a ejecutar el instalador luego)."
+        say "URL vacía: '$name' queda SIN destino y no podrá sincronizar."
+        say "Vuelva a ejecutar este instalador cuando tenga la URL."
         return
     fi
 
     local token=""
-    read -r -s -p "Token de Engram Cloud para '$name' (no se mostrará): " token || true
+    say "Token de '$name'. Lo obtiene el administrador del servidor en su panel,"
+    say "en /dashboard/admin/users. No se mostrará mientras lo escribe."
+    read -r -s -p "  Token: " token || true
     echo
     if [[ -z "$token" ]]; then
-        say "Token vacío: se omite $name (puede volver a ejecutar el instalador luego)."
+        say "Token vacío: '$name' queda SIN credenciales y no podrá sincronizar."
+        say "Vuelva a ejecutar este instalador cuando tenga el token."
         return
     fi
 
