@@ -215,7 +215,8 @@ ask_namespaces_for() {
     say >&2 "Ahora, qué repositorios usarán '$name'."
     say >&2 "Se decide por el remote de git: todo repositorio cuyo origin empiece"
     say >&2 "por uno de estos prefijos irá a esta instancia. Uno por línea."
-    say >&2 "Formato: host[:puerto]/propietario"
+    say >&2 "Formato: host[:puerto]/propietario  — sin https://, sin .git y sin el"
+    say >&2 "nombre del repositorio; solo hasta el propietario u organización."
     say >&2 "Ejemplos: github.com/mi-organizacion   gitlab.miempresa.com:8443/mi-usuario"
     if [[ ${#collected[@]} -gt 0 ]]; then
         say >&2 ""
@@ -278,6 +279,7 @@ ask_one_instance() {
     say "  Carpeta donde '$name' guardará su base de datos."
     say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
     say "  instalación de Engram que ya exista para reutilizar sus memorias."
+    say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
     read -r -p "  Carpeta [Enter = $default_dir]: " dir || true
     dir="${dir:-$default_dir}"
     dir="${dir/#\~/$HOME}"
@@ -402,6 +404,8 @@ ask_instances() {
                 local name
                 say ""
                 say "Escriba el nombre de la instancia nueva (ej: cliente-acme)."
+                say "Formato: minúsculas, dígitos y guiones; empieza por letra o dígito;"
+                say "máximo 32 caracteres."
                 while name="$(read_new_name "  Nombre, o Enter si ya no quiere añadir más: ")"; do
                     [[ -z "$name" ]] && break
                     ask_one_instance "$name"
@@ -458,6 +462,8 @@ ask_instances() {
     say "una búsqueda en una no encuentra nada de la otra."
     say ""
     say "El nombre es suyo: sirve para referirse a ella (ej: work, personal, cliente-acme)."
+    say "Formato aceptado: minúsculas, dígitos y guiones. Debe empezar por letra o"
+    say "dígito, máximo 32 caracteres. Sin espacios, mayúsculas ni acentos."
 
     local name=""
     while :; do
@@ -548,6 +554,7 @@ provision_instance() {
     local token=""
     say "Token de '$name'. Lo obtiene el administrador del servidor en su panel,"
     say "en /dashboard/admin/users. No se mostrará mientras lo escribe."
+    say "Formato: la cadena tal cual se la dieron, sin comillas ni espacios."
     read -r -s -p "  Token: " token || true
     echo
     if [[ -z "$token" ]]; then
