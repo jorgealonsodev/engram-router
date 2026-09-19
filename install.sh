@@ -537,6 +537,12 @@ provision_instance() {
 write_instance_autosync_env() {
     local name="$1"
     local autosync_file="$INSTANCES_ENV_DIR/$name.env"
+    # Create the directory here rather than trusting the mkdir in install_files:
+    # a real install failed with "No such file or directory" at this line even
+    # though that mkdir had reported success, and the cause was never
+    # identified. Whatever removed it, writing a file is the right place to
+    # guarantee its directory.
+    mkdir -p "$INSTANCES_ENV_DIR"
     # Autosync is opt-in per instance (verified: unset means no
     # "[autosync] started" line). Left commented out by default; the
     # colleague enables it explicitly per instance if wanted.
