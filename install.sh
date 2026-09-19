@@ -35,12 +35,15 @@ section() { printf '\n== %s ==\n' "$1"; }
 detect_hazardous_exports() {
     section "Comprobación previa: variables ENGRAM_CLOUD_*"
 
+    # Environment and files are reported separately because the remedy differs.
+    # Variables only in the environment mean the files are already clean and the
+    # session is stale: editing nothing and re-logging in is the whole fix.
     local hazard=0
-    local hits=()
+    local env_hits=() file_hits=()
 
     local var
     for var in $(compgen -e | grep '^ENGRAM_CLOUD_' || true); do
-        hits+=("entorno actual: $var")
+        env_hits+=("$var")
         hazard=1
     done
 
@@ -48,14 +51,14 @@ detect_hazardous_exports() {
     for f in "${DOTFILES_TO_SCAN[@]}"; do
         [[ -r "$f" ]] || continue
         if grep -qE '^\s*(export\s+)?ENGRAM_CLOUD_' "$f" 2>/dev/null; then
-            hits+=("$f")
+            file_hits+=("$f")
             hazard=1
         fi
     done
     for f in "$HOME"/.config/environment.d/*.conf; do
         [[ -e "$f" ]] || continue
         if grep -qE '^\s*ENGRAM_CLOUD_' "$f" 2>/dev/null; then
-            hits+=("$f")
+            file_hits+=("$f")
             hazard=1
         fi
     done
@@ -64,28 +67,48 @@ detect_hazardous_exports() {
         cat <<EOF
 
 Se han detectado variables ENGRAM_CLOUD_* que anularían el enrutamiento
-por cloud.json (ver hallazgo verificado: con estas variables presentes,
-Engram usa ENGRAM_CLOUD_SERVER en vez de leer cloud.json, silenciosamente).
+por cloud.json: con ellas presentes, Engram usa ENGRAM_CLOUD_SERVER en vez
+de leer cloud.json, silenciosamente.
 
-Ubicaciones encontradas:
 EOF
-        for h in "${hits[@]}"; do
-            printf '  - %s\n' "$h"
-        done
-        cat <<EOF
+        if [[ ${#file_hits[@]} -gt 0 ]]; then
+            printf 'Ficheros que las definen:\n'
+            printf '  - %s\n' "${file_hits[@]}"
+            printf '\n'
+        fi
+        if [[ ${#env_hits[@]} -gt 0 ]]; then
+            printf 'Presentes en el entorno de esta sesión:\n'
+            printf '  - %s\n' "${env_hits[@]}"
+            printf '\n'
+        fi
 
-Esta instalación NO va a editar automáticamente ningún dotfile.
+        printf 'Esta instalación NO va a editar automáticamente ningún dotfile.\n\n'
 
-Cómo resolverlo manualmente antes de reintentar:
-  1. Elimine o comente las líneas "export ENGRAM_CLOUD_*" en los ficheros
-     listados arriba.
-  2. Si "\$HOME/.config/environment.d/engram-cloud.conf" existe, elimínelo o
-     vacíelo (es entorno de sesión de systemd, se hereda en todos los
-     procesos de la sesión).
-  3. Cierre sesión y vuelva a entrar (o reinicie la sesión de systemd
-     --user) para que el entorno quede limpio.
+        if [[ ${#file_hits[@]} -eq 0 ]]; then
+            cat <<'EOF'
+Los ficheros ya están limpios: solo queda una sesión antigua.
+
+  1. Cierre sesión y vuelva a entrar.
+     El gestor de systemd --user hereda su entorno al arrancar la sesión y
+     no lo suelta: `systemctl --user unset-environment` no puede quitar esas
+     variables, solo las que él mismo definió.
+  2. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
+  3. Vuelva a ejecutar este instalador.
+EOF
+        else
+            cat <<'EOF'
+Cómo resolverlo antes de reintentar:
+  1. Elimine o comente las líneas ENGRAM_CLOUD_* en los ficheros de arriba.
+     Si hay uno bajo ~/.config/environment.d/, es entorno de sesión de
+     systemd y lo hereda todo proceso de la sesión, no solo las shells.
+  2. Cierre sesión y vuelva a entrar. Un `source` no basta: las variables ya
+     están exportadas en los procesos vivos.
+  3. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
   4. Vuelva a ejecutar este instalador.
-
+EOF
+        fi
+        printf '\n'
+        cat <<EOF
 Instalación detenida.
 EOF
         exit 1
