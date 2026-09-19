@@ -199,11 +199,29 @@ engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
 ## Uninstalling
 
 ```sh
-systemctl --user disable --now engram@<instance>.service
-rm -rf ~/.local/bin/engram ~/.local/bin/engram-{router,doctor,where} \
-       ~/.local/lib/engram-router ~/.config/engram-router \
-       ~/.config/systemd/user/engram@.service
+./uninstall.sh                 # remove the tool, keep every memory
+./uninstall.sh --purge-data    # also offer to delete each instance's data
 ```
 
-Instance data under `~/.local/share/engram-*` is left in place; remove it
-deliberately, since it holds memories that may not exist anywhere else.
+It shows what it will remove and asks before doing anything (`--yes` skips that
+prompt, but never the data prompts).
+
+**Memory data is never removed unless you ask.** Without `--purge-data`, every
+`~/.local/share/engram-<instance>/` directory is left untouched and reported.
+With it, each instance is confirmed separately, because an instance whose
+memories never reached a cloud has no copy anywhere else.
+
+Instances are discovered from `router.json` when present and from the data
+directories otherwise, so a partial or hand-edited install still uninstalls
+cleanly. Running it twice is safe.
+
+`~/.engram` — an existing single-instance installation — is never read, moved
+or removed.
+
+After uninstalling, `engram` is the original binary again, with no routing. If
+you removed `ENGRAM_CLOUD_*` from your environment when you installed, check
+that the original credentials still work before syncing:
+
+```sh
+engram cloud status    # expect: Server source: cloud.json
+```
