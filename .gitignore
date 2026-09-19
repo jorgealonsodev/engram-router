@@ -1,5 +1,5 @@
-# Working notes about the local machine — never published.
-odd/
+# Design notes are published (sanitised); anything machine-specific is not.
+odd/local/
 
 # Real routing rules live here; only the example is tracked.
 config/router.json

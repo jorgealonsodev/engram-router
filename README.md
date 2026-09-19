@@ -4,6 +4,17 @@ Route each git repository's [Engram](https://github.com/Gentleman-Programming/en
 memories to the correct Engram Cloud, so moving between work and personal
 projects cannot replicate data to the wrong server.
 
+## Why it is built this way
+
+`odd/tasks/engram-multi-cloud-router.md` records what was measured about
+Engram's behaviour and why each decision followed from it — why enrollment
+cannot select a destination, why the shim fails closed, why a namespace is
+derived from the remote. Read it before changing routing or the migration
+order; most of it was learned by things breaking quietly.
+
+It is sanitised on purpose. Design rationale is shared; the state of any one
+machine is not, and `engram-doctor` reports that per person instead.
+
 ## Requirements
 
 Linux or macOS. The shim, the installer and the per-instance daemons are bash
