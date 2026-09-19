@@ -128,22 +128,42 @@ Emerged after the original breakdown:
 
 ## Pending
 
-- [ ] P1 Nothing has ever run against a real cloud. install.sh has never been
-      executed, no systemd unit has been installed, no second cloud exists.
-      This is the gap between a validated design and a working product.
-      DONE after this was written: a throwaway `engram cloud serve` proved the
-      path, and a real project was later migrated to a real second cloud and
-      verified server-side.
-- [ ] P2 README does not state that only Linux and macOS are supported, so a
-      Windows colleague would clone and discover it by failing.
-- [ ] P3 Two upstream defects observed and never reported to
+- [x] P1 Run against a real cloud. A throwaway `engram cloud serve` proved the
+      path end to end, and a real project was then migrated to a real second
+      cloud: 147 observations exported, imported, counted, enrolled and pushed,
+      with the server returning them on a pull afterwards.
+- [x] P2 README states the supported platforms, and records the Windows
+      decision with its reasoning so it does not get re-derived.
+- [ ] P3 Two upstream defects observed and still unreported to
       Gentleman-Programming/engram: `sync_state.target_key` carries no server
-      identity (latent silent data loss for anyone repointing an install), and
-      enrollment is a destination-blind boolean.
-- [ ] P4 Per-machine setup is not part of this document. Each person removes
-      their own ENGRAM_CLOUD_* exports and verifies their own credentials;
-      `engram-doctor` reports both. Check that the token in an instance's
-      cloud.json works BEFORE removing the exports that currently override it.
+      identity, which is latent silent data loss for anyone repointing an
+      install at a second server; and enrollment is a destination-blind
+      boolean. The first affects any user, not only a multi-cloud one.
+- [x] P4 Per-machine setup moved out of this document and into `engram-doctor`,
+      which reports environment pollution and each instance's real destination
+      for whoever runs it.
+
+Emerged while using it:
+
+- [ ] P5 Only one project has been migrated. The rest still live in whichever
+      instance predates the split, and `engram-migrate` handles them one
+      repository at a time.
+- [ ] P6 Per-instance systemd units are installed but not enabled, so nothing
+      replicates on its own. Decide whether autosync should be on per instance,
+      remembering it is opt-in and that a resident daemon freezes its
+      environment at exec.
+- [ ] P7 Three checks parse text meant for humans (`Server source:`,
+      `Observations:`, `No new chunks to import`). `engram-doctor` warns on
+      version drift, but the real fix is a machine-readable status upstream.
+- [ ] P8 With more than one contributor, commits should stop going straight to
+      `main`: a branch and a pull request per change, especially for a tool
+      whose failures are silent.
+
+Operational, per person rather than per project:
+
+- Rotate any token that has been exposed. Tokens reach crash dumps, terminal
+  transcripts and world-readable rc files; `engram-doctor` catches only the
+  file modes.
 
 ## Progress notes
 
