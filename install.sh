@@ -397,8 +397,21 @@ ask_instances() {
                 return
                 ;;
             3)
+                # "¿Cuál desea modificar?" read as a yes/no question in real use
+                # and got answered "s", which then looked like a missing
+                # instance. Ask for a name explicitly and offer a way out.
                 local target=""
-                read -r -p "¿Cuál desea modificar? (${INSTALLED_NAMES[*]}): " target || true
+                say ""
+                say "Escriba el NOMBRE de la instancia que quiere modificar."
+                say "Disponibles: ${INSTALLED_NAMES[*]}"
+                read -r -p "  Instancia a modificar (Enter para cancelar): " target || true
+                if [[ -z "$target" ]]; then
+                    for i in "${!INSTALLED_NAMES[@]}"; do
+                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                    done
+                    say "Cancelado: no se ha modificado nada."
+                    return
+                fi
                 for i in "${!INSTALLED_NAMES[@]}"; do
                     if [[ "${INSTALLED_NAMES[$i]}" == "$target" ]]; then
                         ask_one_instance "$target" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
@@ -409,7 +422,8 @@ ask_instances() {
                     fi
                 done
                 if [[ ${#REPROVISION[@]} -eq 0 ]]; then
-                    say "'$target' no existe: no se ha modificado nada."
+                    say "No existe ninguna instancia llamada '$target'."
+                    say "Nombres válidos: ${INSTALLED_NAMES[*]}. No se ha modificado nada."
                 fi
                 return
                 ;;
