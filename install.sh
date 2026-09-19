@@ -163,25 +163,71 @@ install_systemd_unit() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4 — one-or-two instance prompt (default: one, work only).
+# Step 4 — choose which instances to provision.
+#
+# Instance names are free-form: the core treats them as data (a map key, an
+# `engram-<name>` directory suffix, and %i in the templated systemd unit).
+# Nothing hardcodes "work" or "personal".
+#
+# One instance per CLOUD you replicate to — never one per context. Instances
+# are isolation boundaries, not folders: they share no database, so a search in
+# one cannot see the others. Separating clients that all sync to the same cloud
+# belongs in Engram's project names, not in extra instances.
 # ---------------------------------------------------------------------------
+INSTANCE_NAME_RE='^[a-z0-9][a-z0-9-]{0,31}$'
+
 ask_instances() {
     section "Selección de instancias"
-    say "El caso habitual es UNA sola instancia (trabajo)."
-    say "Tener también una instancia personal es una opción avanzada, nunca obligatoria."
+    say "Cree UNA instancia por cada Engram Cloud al que sincronice."
+    say "No cree instancias por contexto de trabajo: no comparten base de datos,"
+    say "así que una búsqueda en una no ve las memorias de las otras."
 
-    INSTANCES_TO_PROVISION=(work)
+    INSTANCES_TO_PROVISION=()
 
-    if [[ -t 0 ]]; then
-        local answer=""
-        read -r -p "¿Tiene también una cuenta Engram personal que quiera enrutar por separado? [s/N]: " answer || true
-        case "${answer,,}" in
-            s|si|sí|y|yes) INSTANCES_TO_PROVISION+=(personal) ;;
-            *) : ;;
-        esac
-    else
-        say "Entrada no interactiva: se instala solo la instancia de trabajo por defecto."
+    if [[ ! -t 0 ]]; then
+        INSTANCES_TO_PROVISION=(work)
+        say "Entrada no interactiva: se instala solo la instancia 'work' por defecto."
+        return
     fi
+
+    local name=""
+    while :; do
+        local prompt="Nombre de la instancia"
+        if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
+            prompt+=" [work]: "
+        else
+            prompt+=" (Enter para terminar): "
+        fi
+
+        read -r -p "$prompt" name || true
+
+        if [[ -z "$name" ]]; then
+            # First prompt defaults to "work"; later ones end the loop.
+            if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
+                INSTANCES_TO_PROVISION=(work)
+            fi
+            break
+        fi
+
+        if [[ ! "$name" =~ $INSTANCE_NAME_RE ]]; then
+            say "Nombre inválido: use minúsculas, dígitos y guiones (máx. 32). Ej: work, cliente-acme"
+            continue
+        fi
+
+        local dup="" existing=""
+        for existing in ${INSTANCES_TO_PROVISION[@]+"${INSTANCES_TO_PROVISION[@]}"}; do
+            [[ "$existing" == "$name" ]] && dup=1
+        done
+        if [[ -n "$dup" ]]; then
+            say "'$name' ya está en la lista."
+            continue
+        fi
+
+        INSTANCES_TO_PROVISION+=("$name")
+        say "Añadida instancia '$name' (datos en ~/.local/share/engram-$name)."
+    done
+
+    say "Instancias a aprovisionar: ${INSTANCES_TO_PROVISION[*]}"
 }
 
 # ---------------------------------------------------------------------------

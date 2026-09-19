@@ -15,6 +15,11 @@
       "data_dir": "$HOME/.local/share/engram-personal",
       "port": 7439,
       "autosync": true
+    },
+    "client-acme": {
+      "data_dir": "$HOME/.local/share/engram-client-acme",
+      "port": 7440,
+      "autosync": true
     }
   }
 }

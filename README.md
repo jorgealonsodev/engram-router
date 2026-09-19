@@ -122,13 +122,32 @@ cd engram-router
 ./install.sh
 ```
 
-The installer is interactive and idempotent. It asks whether you also have a
-personal Engram; the default is a single work instance. It prompts for your
-token, writes it to `cloud.json` with mode 0600, and never echoes or logs it.
-It verifies the shim actually wins in `PATH`, then runs the doctor.
+The installer is interactive and idempotent. It asks for instance names one at
+a time — press Enter on the first prompt to accept a single `work` instance, or
+name as many as you need. For each one it prompts for the server URL and token,
+writes them to that instance's `cloud.json` with mode 0600, and never echoes or
+logs the token. It then verifies the shim actually wins in `PATH` and runs the
+doctor.
 
 Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
 are per person; this repository ships none.
+
+## How many instances
+
+Instance names are free-form. Nothing in the core hardcodes `work` or
+`personal`: a name is a map key, an `engram-<name>` directory suffix, and `%i`
+in the templated systemd unit.
+
+**Create one instance per cloud you replicate to — never one per context.**
+
+Instances are isolation boundaries, not folders. They share no database, so a
+search inside one cannot see the memories of another. That isolation is the
+whole point when the destinations differ, and pure loss when they do not. Three
+clients that all sync to the same company cloud belong in one instance,
+separated by Engram's own project names; three clients with three separate
+Engram Clouds genuinely need three instances.
+
+Each instance costs a port, a user unit and a resident daemon.
 
 ## Configuring your rules
 
