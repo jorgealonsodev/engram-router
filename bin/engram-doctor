@@ -7,6 +7,10 @@ set -uo pipefail
 ROUTER_CONFIG="${ENGRAM_ROUTER_CONFIG:-$HOME/.config/engram-router/router.json}"
 SHIM_DIR="${ENGRAM_ROUTER_BIN:-$HOME/.local/bin}"
 
+# The Engram release every coupling in this tool was verified against. Bump it
+# only after re-checking the fragile ones, listed in check_engram_version.
+ENGRAM_VERIFIED_VERSION="2.0.0"
+
 FAILURES=0
 WARNINGS=0
 
@@ -74,6 +78,46 @@ check_env_pollution() {
 # Check 2: PATH precedence — the shim must win over any other "engram" on
 # PATH (e.g. the Homebrew install).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Engram version drift. A warning, never a failure: a newer Engram is expected
+# to work, and blocking on it would be wrong.
+#
+# It is worth saying out loud because three couplings here parse text meant for
+# humans — "Server source:" and "Observations:" in engram-router and
+# engram-migrate, and "No new chunks to import" in engram-migrate. A reworded
+# message breaks those silently: engram-where would report a missing cloud.json
+# and a migration would accept an empty import. That exact class of failure has
+# already happened once, with the cloud.json key.
+# ---------------------------------------------------------------------------
+check_engram_version() {
+    echo "== Versión de Engram =="
+
+    local real ver
+    real="$(PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd:)" \
+            command -v engram 2>/dev/null || true)"
+    if [[ -z "$real" ]]; then
+        warn "no se encontró el binario real de Engram; no se puede comprobar la versión"
+        return
+    fi
+
+    ver="$("$real" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [[ -z "$ver" ]]; then
+        warn "no se pudo leer la versión de '$real'; verificado con $ENGRAM_VERIFIED_VERSION"
+        return
+    fi
+
+    if [[ "$ver" == "$ENGRAM_VERIFIED_VERSION" ]]; then
+        pass "Engram $ver, la versión con la que se verificó esta herramienta"
+        return
+    fi
+
+    warn "Engram $ver; esta herramienta se verificó con $ENGRAM_VERIFIED_VERSION."
+    warn "  No tiene por qué fallar, pero tres comprobaciones leen texto de salida de"
+    warn "  Engram ('Server source:', 'Observations:', 'No new chunks to import') y una"
+    warn "  reformulación las rompería SIN dar error. Compruebe que 'engram-where'"
+    warn "  muestra el servidor de cada instancia antes de fiarse de una migración."
+}
+
 check_path_precedence() {
     echo "== Precedencia en PATH =="
     local resolved
@@ -212,6 +256,8 @@ main() {
         INSTANCE_NAMES=()
     fi
 
+    check_engram_version
+    echo
     check_env_pollution
     echo
     check_path_precedence

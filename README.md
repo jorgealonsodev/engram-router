@@ -278,6 +278,27 @@ them publishes their contents to everyone with repository access.
 `engram-migrate` deletes them for you. `.engram/config.json` is the part meant
 to be committed.
 
+## When Engram itself is upgraded
+
+`engram-doctor` reports the installed Engram version and warns when it is not
+the one this tool was verified against. It is a warning, never a failure: a
+newer Engram is expected to work.
+
+It is worth saying out loud because three checks parse text meant for humans —
+`Server source:` and `Observations:` in `engram-router` and `engram-migrate`,
+and `No new chunks to import` in `engram-migrate`. A reworded message breaks
+those **silently**: `engram-where` would report a missing `cloud.json`, and a
+migration would accept an empty import. That class of failure has already
+happened once here, over a key name in `cloud.json`.
+
+Everything else is on firmer ground. `ENGRAM_DATA_DIR` is documented in
+`engram --help`, and `cloud enroll`, `cloud unenroll`, `cloud status` and
+`sync --import` are public subcommands. The shim and the routing depend on
+none of it: they set `ENGRAM_DATA_DIR` and exec the real binary.
+
+After upgrading Engram, run `engram-doctor` and check that each instance shows
+its server before trusting a migration.
+
 ## Diagnosing
 
 ```sh
