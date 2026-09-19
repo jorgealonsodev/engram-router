@@ -1,0 +1,9 @@
+# Working notes about the local machine — never published.
+odd/
+
+# Real routing rules live here; only the example is tracked.
+config/router.json
+
+# Local instance state
+.engram/
+*.log

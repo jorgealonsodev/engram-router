@@ -1,0 +1,25 @@
+[Unit]
+Description=Engram daemon (instance: %i)
+Documentation=https://github.com/your-user/engram-router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Per-instance isolation: ENGRAM_DATA_DIR fully isolates one instance's
+# database, .instance-id, and cloud.json from every other instance
+# (verified: a second daemon with its own data dir created its own
+# engram.db and never touched the main database).
+Environment=ENGRAM_DATA_DIR=%h/.local/share/engram-%i
+EnvironmentFile=-%h/.config/engram-router/instances/%i.env
+ExecStart=%h/.local/bin/engram-real-path-placeholder serve
+Restart=on-failure
+RestartSec=5
+
+# The unit intentionally does NOT set ENGRAM_CLOUD_*: credentials must come
+# from this instance's own %h/.local/share/engram-%i/cloud.json. Autosync
+# is opt-in per instance via ENGRAM_CLOUD_AUTOSYNC, set (if desired) only
+# in the per-instance EnvironmentFile above, never here.
+
+[Install]
+WantedBy=default.target

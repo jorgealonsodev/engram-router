@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# bin/engram-doctor — read-only diagnostics for the Engram multi-cloud
+# router. Never mutates any file, daemon, database, or environment.
+# Exits non-zero if any check fails.
+set -uo pipefail
+
+ROUTER_CONFIG="${ENGRAM_ROUTER_CONFIG:-$HOME/.config/engram-router/router.json}"
+SHIM_DIR="${ENGRAM_ROUTER_BIN:-$HOME/.local/bin}"
+
+FAILURES=0
+WARNINGS=0
+
+pass() { printf '  [OK]   %s\n' "$1"; }
+warn() { printf '  [AVISO] %s\n' "$1"; ((WARNINGS++)) || true; }
+fail() { printf '  [FALLO] %s\n' "$1"; ((FAILURES++)) || true; }
+
+_self_dir() {
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_find_router_lib() {
+    local self_dir installed_lib sibling_lib
+    self_dir="$(_self_dir)"
+    installed_lib="${ENGRAM_ROUTER_LIB:-$HOME/.local/lib/engram-router/router.sh}"
+    sibling_lib="$self_dir/../lib/router.sh"
+    if [[ -r "$installed_lib" ]]; then
+        printf '%s\n' "$installed_lib"
+    elif [[ -r "$sibling_lib" ]]; then
+        printf '%s\n' "$sibling_lib"
+    else
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Check 1: environment pollution — ENGRAM_CLOUD_* exported right now, and
+# present (read-only grep) in known dotfile/session-environment locations.
+# ---------------------------------------------------------------------------
+check_env_pollution() {
+    echo "== Contaminación de entorno (ENGRAM_CLOUD_*) =="
+
+    local polluted=0
+    local var
+    for var in $(compgen -e | grep '^ENGRAM_CLOUD_' || true); do
+        fail "variable de entorno activa ahora mismo: $var (esto anula cloud.json en cualquier proceso lanzado desde esta shell)"
+        polluted=1
+    done
+    [[ $polluted -eq 0 ]] && pass "sin variables ENGRAM_CLOUD_* activas en el entorno actual"
+
+    local files=(
+        "$HOME/.bashrc"
+        "$HOME/.bash_profile"
+        "$HOME/.profile"
+        "$HOME/.zshrc"
+        "$HOME/.zprofile"
+    )
+    local f
+    for f in "$HOME"/.config/environment.d/*.conf; do
+        [[ -e "$f" ]] && files+=("$f")
+    done
+
+    local hazard_found=0
+    for f in "${files[@]}"; do
+        [[ -r "$f" ]] || continue
+        if grep -qE '^\s*(export\s+)?ENGRAM_CLOUD_' "$f" 2>/dev/null; then
+            fail "exportación ENGRAM_CLOUD_* encontrada en $f"
+            hazard_found=1
+        fi
+    done
+    [[ $hazard_found -eq 0 ]] && pass "sin exportaciones ENGRAM_CLOUD_* en los dotfiles/entorno de sesión conocidos"
+}
+
+# ---------------------------------------------------------------------------
+# Check 2: PATH precedence — the shim must win over any other "engram" on
+# PATH (e.g. the Homebrew install).
+# ---------------------------------------------------------------------------
+check_path_precedence() {
+    echo "== Precedencia en PATH =="
+    local resolved
+    resolved="$(command -v engram 2>/dev/null || true)"
+    if [[ -z "$resolved" ]]; then
+        fail "no se encontró 'engram' en absoluto en el PATH"
+        return
+    fi
+    if [[ "$resolved" == "$SHIM_DIR/engram" ]]; then
+        pass "el shim ($resolved) tiene prioridad en PATH"
+    else
+        fail "'engram' resuelve a $resolved, NO al shim ($SHIM_DIR/engram) — anteponga $SHIM_DIR al PATH (por ejemplo, en ~/.bashrc: export PATH=\"$SHIM_DIR:\$PATH\", antes de cualquier línea que añada Homebrew al PATH)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Check 3: per-instance destination readback. Reads cloud.json directly and
+# checks for ENGRAM_CLOUD_* env pollution — the same mechanism verified in
+# the audit (finding #6): a clean environment resolves from cloud.json, a
+# polluted one silently resolves from ENGRAM_CLOUD_SERVER instead.
+# ---------------------------------------------------------------------------
+check_instance_destinations() {
+    echo "== Lectura de destino por instancia =="
+    if [[ ${#INSTANCE_NAMES[@]} -eq 0 ]]; then
+        warn "no hay instancias configuradas en $ROUTER_CONFIG"
+        return
+    fi
+
+    local env_polluted=0
+    if compgen -e | grep -q '^ENGRAM_CLOUD_'; then
+        env_polluted=1
+    fi
+
+    local name data_dir cloud_json
+    for name in "${INSTANCE_NAMES[@]}"; do
+        data_dir="$(router_expand_path "${INSTANCE_DATA_DIR[$name]}")"
+        cloud_json="$data_dir/cloud.json"
+
+        if [[ $env_polluted -eq 1 ]]; then
+            fail "$name: el entorno actual tiene ENGRAM_CLOUD_* activo — cualquier proceso heredaría ese servidor en vez de $cloud_json"
+            continue
+        fi
+        if [[ ! -d "$data_dir" ]]; then
+            warn "$name: data dir no aprovisionado todavía ($data_dir)"
+            continue
+        fi
+        if [[ ! -r "$cloud_json" ]]; then
+            warn "$name: sin cloud.json (instancia no enrolada todavía) en $data_dir"
+            continue
+        fi
+        local perms
+        perms="$(stat -c '%a' "$cloud_json" 2>/dev/null || echo '?')"
+        if [[ "$perms" != "600" ]]; then
+            fail "$name: cloud.json tiene permisos $perms, se esperaba 600 ($cloud_json)"
+        else
+            pass "$name: Server source: cloud.json (permisos 600, $cloud_json)"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Check 4: daemon liveness per instance, via the systemd user unit — a
+# read-only status query, nothing is started or stopped.
+# ---------------------------------------------------------------------------
+check_daemon_liveness() {
+    echo "== Estado de los daemons (systemd --user) =="
+    if [[ ${#INSTANCE_NAMES[@]} -eq 0 ]]; then
+        warn "no hay instancias configuradas en $ROUTER_CONFIG"
+        return
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "systemctl no disponible; no se puede comprobar el estado de los daemons"
+        return
+    fi
+
+    local name state
+    for name in "${INSTANCE_NAMES[@]}"; do
+        state="$(systemctl --user is-active "engram@${name}.service" 2>/dev/null || true)"
+        case "$state" in
+            active)
+                pass "$name: engram@${name}.service activo"
+                ;;
+            inactive|failed|"")
+                warn "$name: engram@${name}.service no está activo (estado: ${state:-desconocido})"
+                ;;
+            *)
+                warn "$name: engram@${name}.service estado inesperado: $state"
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Check 5: routing explanation for the current directory.
+# ---------------------------------------------------------------------------
+check_current_repo_routing() {
+    echo "== Enrutamiento del repositorio actual =="
+    local repo_dir
+    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+    router_resolve "$repo_dir" "$ROUTER_CONFIG" || true
+
+    printf '  repo:      %s\n' "$(basename "$repo_dir")"
+    printf '  remote:    %s\n' "${ROUTER_NORMALIZED:-${ROUTER_REMOTE:-"(sin remoto)"}}"
+    printf '  regla:     %s\n' "${ROUTER_MATCHED_RULE:-ninguna}"
+
+    if [[ -n "$ROUTER_INSTANCE" ]]; then
+        pass "instancia resuelta: $ROUTER_INSTANCE (${ROUTER_DATA_DIR:-sin data_dir})"
+    else
+        warn "sin instancia resuelta — las operaciones de nube serían rechazadas aquí"
+    fi
+}
+
+main() {
+    echo "engram-doctor — diagnóstico de solo lectura"
+    echo
+
+    local router_lib
+    if ! router_lib="$(_find_router_lib)"; then
+        fail "no se pudo localizar lib/router.sh"
+        echo
+        echo "resumen: $FAILURES fallo(s), $WARNINGS aviso(s)"
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$router_lib"
+
+    if [[ -r "$ROUTER_CONFIG" ]]; then
+        router_load_config "$ROUTER_CONFIG" || fail "no se pudo leer/parsear $ROUTER_CONFIG"
+    else
+        warn "no existe fichero de configuración de reglas: $ROUTER_CONFIG"
+        # shellcheck disable=SC2034 # read by router_match_instance/checks below
+        RULE_PREFIXES=()
+        # shellcheck disable=SC2034
+        RULE_INSTANCES=()
+        INSTANCE_NAMES=()
+    fi
+
+    check_env_pollution
+    echo
+    check_path_precedence
+    echo
+    check_instance_destinations
+    echo
+    check_daemon_liveness
+    echo
+    check_current_repo_routing
+    echo
+
+    echo "resumen: $FAILURES fallo(s), $WARNINGS aviso(s)"
+    [[ $FAILURES -eq 0 ]]
+}
+
+main "$@"

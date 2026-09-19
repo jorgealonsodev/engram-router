@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# bin/engram-router — resolves a repository to its Engram instance, and
+# doubles as the "engram-where" explainer (per the shipped `engram-where`
+# symlink, or the "where"/"explain" subcommand).
+#
+# Usage:
+#   engram-router resolve [PATH]   machine-readable KEY=VALUE routing facts
+#   engram-router where   [PATH]   human-readable (Spanish) routing summary
+#   engram-router explain [PATH]   alias for "where"
+#
+# Invoked as "engram-where" (e.g. via a symlink), it behaves as "where" by
+# default, with no subcommand needed.
+set -euo pipefail
+
+ROUTER_CONFIG="${ENGRAM_ROUTER_CONFIG:-$HOME/.config/engram-router/router.json}"
+
+_self_dir() {
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_find_router_lib() {
+    local self_dir installed_lib sibling_lib
+    self_dir="$(_self_dir)"
+    installed_lib="${ENGRAM_ROUTER_LIB:-$HOME/.local/lib/engram-router/router.sh}"
+    sibling_lib="$self_dir/../lib/router.sh"
+    if [[ -r "$installed_lib" ]]; then
+        printf '%s\n' "$installed_lib"
+    elif [[ -r "$sibling_lib" ]]; then
+        printf '%s\n' "$sibling_lib"
+    else
+        return 1
+    fi
+}
+
+_load_lib_or_die() {
+    local router_lib
+    if ! router_lib="$(_find_router_lib)"; then
+        echo "engram-router: no se pudo localizar lib/router.sh" >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$router_lib"
+}
+
+# Reads <instance>'s configured cloud server URL directly from its
+# cloud.json (no engram subcommand invoked — this is a plain file read, so
+# it never risks the env-var-override hazard described in the feature
+# document's finding #6).
+_instance_cloud_server() {
+    local data_dir="$1"
+    local cloud_json="$data_dir/cloud.json"
+    [[ -r "$cloud_json" ]] || return 1
+    local content
+    content="$(cat "$cloud_json")"
+    local -A obj=()
+    _router_json_parse_flat_object "$content" 0 obj || return 1
+    local server="${obj[server]:-}"
+    [[ -n "$server" ]] || return 1
+    printf '%s\n' "$server"
+}
+
+cmd_resolve() {
+    local path="${1:-$PWD}"
+    _load_lib_or_die
+    router_resolve "$path" "$ROUTER_CONFIG"
+    printf 'REMOTE=%s\n' "$ROUTER_REMOTE"
+    printf 'NORMALIZED=%s\n' "$ROUTER_NORMALIZED"
+    printf 'SOURCE=%s\n' "$ROUTER_SOURCE"
+    printf 'MATCHED_RULE=%s\n' "$ROUTER_MATCHED_RULE"
+    printf 'INSTANCE=%s\n' "$ROUTER_INSTANCE"
+    printf 'DATA_DIR=%s\n' "$ROUTER_DATA_DIR"
+    [[ -n "$ROUTER_INSTANCE" ]]
+}
+
+cmd_where() {
+    local path="${1:-$PWD}"
+    _load_lib_or_die
+    router_resolve "$path" "$ROUTER_CONFIG"
+
+    local repo_name
+    repo_name="$(cd "$path" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)"
+    repo_name="${repo_name:-$path}"
+    repo_name="$(basename "$repo_name")"
+
+    local regla="${ROUTER_MATCHED_RULE:-ninguna}"
+    [[ "$ROUTER_SOURCE" == "override" ]] && regla="override (.engram/config.json)"
+
+    local instancia="sin resolver"
+    local cloud_line="(sin instancia resuelta)"
+    local estado="cloud refused"
+
+    if [[ -n "$ROUTER_INSTANCE" ]]; then
+        instancia="${ROUTER_INSTANCE} (${ROUTER_DATA_DIR:-sin data_dir configurado})"
+        if [[ -n "$ROUTER_DATA_DIR" ]]; then
+            local server
+            if server="$(_instance_cloud_server "$ROUTER_DATA_DIR")"; then
+                cloud_line="$server"
+                estado="enrolled"
+            else
+                cloud_line="(cloud.json ausente o sin server configurado)"
+                estado="not enrolled"
+            fi
+        fi
+    fi
+
+    cat <<EOF
+  repo:      $repo_name
+  remote:    ${ROUTER_NORMALIZED:-$ROUTER_REMOTE}
+  regla:     $regla
+  instancia: $instancia
+  cloud:     $cloud_line
+  estado:    $estado
+EOF
+}
+
+main() {
+    local sub="${1:-}"
+    case "$sub" in
+        resolve)
+            shift
+            cmd_resolve "$@"
+            ;;
+        where|explain)
+            shift
+            cmd_where "$@"
+            ;;
+        *)
+            # No recognized subcommand: this is either "engram-where" (which
+            # takes an optional PATH, not a subcommand) or a bare PATH
+            # argument to engram-router itself. Both explain by default.
+            cmd_where "$@"
+            ;;
+    esac
+}
+
+main "$@"

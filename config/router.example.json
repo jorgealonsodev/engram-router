@@ -1,0 +1,20 @@
+{
+  "rules": [
+    { "prefix": "github.com/your-org", "instance": "work" },
+    { "prefix": "gitlab.example.com:8443/your-user", "instance": "work" },
+    { "prefix": "github.com/your-user", "instance": "personal" },
+    { "prefix": "gitlab.com/your-user", "instance": "personal" }
+  ],
+  "instances": {
+    "work": {
+      "data_dir": "$HOME/.local/share/engram-work",
+      "port": 7438,
+      "autosync": true
+    },
+    "personal": {
+      "data_dir": "$HOME/.local/share/engram-personal",
+      "port": 7439,
+      "autosync": true
+    }
+  }
+}
