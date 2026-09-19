@@ -189,11 +189,55 @@ git::@github.com/owner/repo                # plugin-manager prefix
 in that repository's `.engram/config.json`. It beats the rules. Commit it and
 your teammates inherit the routing.
 
+## Moving a project between instances
+
+A project whose memories already live in one instance does not move by being
+enrolled elsewhere: enrollment grants replication, it does not carry data. The
+manual procedure is eight steps and three of them fail quietly when skipped, so
+it is scripted:
+
+```sh
+cd <repository>
+engram-migrate --from personal --to work --dry-run   # show the plan
+engram-migrate --from personal --to work             # do it
+```
+
+It verifies the destination resolves from its own `cloud.json` before touching
+anything, exports (project-scoped), imports, **checks the counts agree before
+pushing**, enrolls only once the data is there, pushes, unenrolls the source
+last, and deletes the exported chunks.
+
+Every call runs with `ENGRAM_CLOUD_*` stripped and reaches the real binary
+directly, so neither a polluted environment nor the shim can redirect a
+migration in progress.
+
+If any step fails, nothing after it runs: the source keeps its memories and its
+enrollment, and the exported chunks stay on disk. Import is idempotent, so
+fixing the problem and re-running resumes rather than duplicating.
+
+Two things it deliberately does not do. It does not delete the source memories
+— `--keep-source-enrolled` even leaves them replicating. And it cannot remove
+what a previous cloud already received; that is your decision, not a routing
+one.
+
+**Run it before adding a routing rule for that repository.** The shim exports
+`ENGRAM_DATA_DIR` unconditionally, so once a rule sends the repo to the
+destination there is no way to export from the source.
+
+### Never commit exported chunks
+
+`engram sync` prints `git add .engram/ && git commit`. Do not follow it for
+`.engram/chunks/`: those are your memories in portable form, and committing
+them publishes their contents to everyone with repository access.
+`engram-migrate` deletes them for you. `.engram/config.json` is the part meant
+to be committed.
+
 ## Diagnosing
 
 ```sh
 engram-where     # where does THIS repository sync, and why
 engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
+engram-migrate   # move a repository's memories between instances
 ```
 
 ## Uninstalling

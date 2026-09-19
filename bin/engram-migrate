@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# Move one repository's Engram memories from one instance to another.
+#
+# The manual procedure is eight steps and three of them are quietly dangerous:
+# skipping the destination check pushes work data to a personal cloud, skipping
+# the source unenroll leaves the project replicating to both, and following
+# Engram's own "git add .engram/" hint commits the memories themselves.
+#
+# Order matters and is enforced here: verify, export, import, verify again,
+# enroll, push, unenroll, clean. Enrolling before importing would enroll a
+# project with no observations and look like it worked.
+#
+# Run this from inside the repository being migrated, BEFORE a routing rule
+# sends it to the destination instance: the shim exports ENGRAM_DATA_DIR
+# unconditionally, so once the rule matches there is no way back to the source.
+set -euo pipefail
+
+CONFIG_DIR="${ENGRAM_ROUTER_CONFIG_DIR:-$HOME/.config/engram-router}"
+CONFIG_FILE="$CONFIG_DIR/router.json"
+
+FROM=""; TO=""; DRY_RUN=0; ASSUME_YES=0; KEEP_SOURCE=0
+
+say()  { printf '  %s\n' "$*"; }
+step() { printf '\n[%s] %s\n' "$1" "$2"; }
+die()  { printf '\nABORTADO: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'USAGE'
+Uso: engram-migrate --from <instancia> --to <instancia> [opciones]
+
+Ejecútelo DENTRO del repositorio que quiere migrar.
+
+  --from <nombre>          Instancia origen (donde están hoy las memorias).
+  --to <nombre>            Instancia destino.
+  --dry-run                Muestra el plan y no cambia nada.
+  --keep-source-enrolled   No desenrola en origen (seguirá replicando allí).
+  --yes                    No pedir confirmación.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --from) FROM="${2:-}"; shift 2 ;;
+        --to)   TO="${2:-}";   shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --keep-source-enrolled) KEEP_SOURCE=1; shift ;;
+        --yes|-y) ASSUME_YES=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Opción desconocida: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[[ -n "$FROM" && -n "$TO" ]] || { usage >&2; exit 2; }
+[[ "$FROM" != "$TO" ]] || die "origen y destino son la misma instancia ('$FROM')."
+
+# The shim exports ENGRAM_DATA_DIR unconditionally, so every call below must
+# reach the real binary directly or it would be redirected mid-migration.
+resolve_real_engram() {
+    local self_dir stripped entry
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    stripped=""
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        [[ "$(cd "$entry" 2>/dev/null && pwd)" == "$self_dir" ]] && continue
+        stripped="${stripped:+$stripped:}$entry"
+    done < <(printf '%s' "${PATH:-}" | tr ':' '\n')
+    PATH="$stripped" command -v engram 2>/dev/null
+}
+
+REAL_ENGRAM="$(resolve_real_engram || true)"
+[[ -n "$REAL_ENGRAM" ]] || die "no se encuentra el binario real de engram."
+
+# Instance data dirs come from router.json; both must be configured.
+instance_data_dir() {
+    local name="$1"
+    [[ -r "$CONFIG_FILE" ]] || return 1
+    sed -n "s/.*\"$name\"[[:space:]]*:[[:space:]]*{[^}]*\"data_dir\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" |
+        head -1 | sed "s#^\$HOME#$HOME#; s#^~#$HOME#"
+}
+
+FROM_DIR="$(instance_data_dir "$FROM" || true)"
+TO_DIR="$(instance_data_dir "$TO" || true)"
+[[ -n "$FROM_DIR" ]] || die "la instancia '$FROM' no está en $CONFIG_FILE."
+[[ -n "$TO_DIR"   ]] || die "la instancia '$TO' no está en $CONFIG_FILE."
+[[ -d "$FROM_DIR" ]] || die "el directorio de datos de '$FROM' no existe: $FROM_DIR"
+[[ -d "$TO_DIR"   ]] || die "el directorio de datos de '$TO' no existe: $TO_DIR"
+
+# Engram's own project detection: git remote first, then directory name.
+remote="$(git remote get-url origin 2>/dev/null || true)"
+if [[ -n "$remote" ]]; then
+    PROJECT="$(basename -s .git "$remote")"
+else
+    PROJECT="$(basename "$PWD")"
+fi
+[[ -n "$PROJECT" ]] || die "no se puede determinar el proyecto desde $PWD."
+
+# Every call is environment-clean: a stray ENGRAM_CLOUD_* would override the
+# instance's own cloud.json and silently send this data to the wrong server.
+run_in() {
+    local data_dir="$1"; shift
+    env -u ENGRAM_CLOUD_SERVER -u ENGRAM_CLOUD_TOKEN -u ENGRAM_CLOUD_AUTOSYNC \
+        ENGRAM_DATA_DIR="$data_dir" "$REAL_ENGRAM" "$@"
+}
+
+printf '\n=== Migración de "%s" ===\n' "$PROJECT"
+say "origen:  $FROM  ($FROM_DIR)"
+say "destino: $TO  ($TO_DIR)"
+[[ $DRY_RUN -eq 1 ]] && say "MODO SIMULACIÓN: no se cambia nada."
+
+# ---------------------------------------------------------------------------
+# Step 0 — the destination must resolve from its own cloud.json. A polluted
+# environment here means pushing this project to the wrong server.
+# ---------------------------------------------------------------------------
+step 0 "Verificando el destino"
+dest_status="$(run_in "$TO_DIR" cloud status 2>&1 || true)"
+dest_server="$(printf '%s' "$dest_status" | sed -n 's/^Server:[[:space:]]*//p' | head -1)"
+dest_source="$(printf '%s' "$dest_status" | sed -n 's/^Server source:[[:space:]]*//p' | head -1)"
+
+say "servidor: ${dest_server:-<ninguno>}"
+say "origen del ajuste: ${dest_source:-<ninguno>}"
+
+[[ "$dest_source" == "cloud.json" ]] || die \
+"el destino no resuelve desde su cloud.json (origen: ${dest_source:-ninguno}).
+        Con ENGRAM_CLOUD_* en el entorno, esta migración empujaría al servidor
+        equivocado. Retire esas variables y vuelva a intentarlo."
+[[ -n "$dest_server" ]] || die "el destino no tiene servidor configurado."
+
+if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; then
+    read -r -p "  ¿Migrar '$PROJECT' a $dest_server? [s/N]: " a || true
+    [[ "${a,,}" =~ ^(s|si|sí|y|yes)$ ]] || die "cancelado por el usuario."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 — export. Project-scoped: only this project leaves the source.
+# ---------------------------------------------------------------------------
+step 1 "Exportando desde '$FROM'"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram sync"
+    exported="?"
+else
+    out="$(run_in "$FROM_DIR" sync 2>&1)"
+    printf '%s\n' "$out" | sed 's/^/  /'
+    exported="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*Observations:[[:space:]]*//p' | head -1)"
+    [[ -d .engram/chunks ]] || die "el export no creó .engram/chunks/."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2 and 3 — import, then check the counts agree before anything is
+# pushed. Import is idempotent, so a re-run reports zero new chunks.
+# ---------------------------------------------------------------------------
+step 2 "Importando en '$TO'"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram sync --import"
+else
+    out="$(run_in "$TO_DIR" sync --import 2>&1)"
+    printf '%s\n' "$out" | sed 's/^/  /'
+    imported="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*Observations:[[:space:]]*//p' | head -1)"
+
+    step 3 "Comprobando las cuentas"
+    if printf '%s' "$out" | grep -q 'No new chunks to import'; then
+        say "ya estaba importado (reejecución): se continúa."
+    elif [[ -n "$exported" && -n "$imported" && "$exported" == "$imported" ]]; then
+        say "exportadas $exported = importadas $imported"
+    else
+        die "las cuentas no cuadran (exportadas='${exported:-?}' importadas='${imported:-?}').
+        No se ha enrolado ni empujado nada. El origen está intacto."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4 and 5 — enroll only now that the data is there, then push.
+# ---------------------------------------------------------------------------
+step 4 "Enrolando '$PROJECT' en '$TO'"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram cloud enroll $PROJECT"
+else
+    run_in "$TO_DIR" cloud enroll "$PROJECT" 2>&1 | sed 's/^/  /' || true
+fi
+
+step 5 "Empujando a $dest_server"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram sync --cloud --project $PROJECT"
+else
+    run_in "$TO_DIR" sync --cloud --project "$PROJECT" 2>&1 | sed 's/^/  /' ||
+        die "el push falló. El proyecto ya está importado y enrolado en '$TO';
+        corrija el problema y vuelva a ejecutar (el import es idempotente)."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6 — stop the source replicating. Last on purpose: until the push
+# succeeded, the source copy was the only one reaching a cloud.
+# ---------------------------------------------------------------------------
+step 6 "Desenrolando '$PROJECT' en '$FROM'"
+if [[ $KEEP_SOURCE -eq 1 ]]; then
+    say "omitido por --keep-source-enrolled: seguirá replicando en '$FROM'."
+elif [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram cloud unenroll $PROJECT"
+else
+    run_in "$FROM_DIR" cloud unenroll "$PROJECT" 2>&1 | sed 's/^/  /' || true
+    say "las memorias siguen en '$FROM'; solo deja de replicarlas."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 7 — the chunks are memories in plain form. Engram suggests committing
+# them; that would publish their contents to everyone with repository access.
+# ---------------------------------------------------------------------------
+step 7 "Limpiando los chunks exportados"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) rm -rf .engram/chunks .engram/manifest.json"
+else
+    rm -rf .engram/chunks .engram/manifest.json
+    say "borrados (contenían sus memorias: nunca deben commitearse)."
+    [[ -f .engram/config.json ]] && say "conservado .engram/config.json"
+fi
+
+printf '\n=== Hecho ===\n'
+say "'$PROJECT' está ahora en '$TO' y replica a $dest_server."
+[[ $KEEP_SOURCE -eq 0 ]] && say "Las memorias antiguas siguen en '$FROM' y en el cloud al que ya se subieron."
+say "Lo ya replicado a un cloud anterior NO se borra: eso es una decisión suya."
