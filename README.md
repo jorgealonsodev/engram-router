@@ -123,7 +123,9 @@ cd engram-router
 ```
 
 Re-running the installer over an existing configuration shows it and offers to
-keep it, add an instance, modify one, or start over. Keeping or adding never
+keep it, add an instance, modify one, or start over. Modifying one lists its
+current namespaces and adds to them: type a new one to append it, or
+`-<namespace>` to drop it. Nothing has to be retyped. Keeping or adding never
 re-asks for the credentials of instances you are not touching, and the previous
 `router.json` is backed up beside itself.
 

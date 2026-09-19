@@ -201,35 +201,46 @@ ask_namespaces_for() {
     # returns the collected namespaces on stdout, so anything else printed
     # there would be captured by the caller and written into router.json as
     # rules. That is exactly what happened before this redirect existed.
+    #
+    # Existing namespaces are pre-loaded rather than replaced, so adding one
+    # more to an instance does not mean retyping the ones already there.
     local name="$1" current="$2"
     local -a collected=()
-    local ns=""
+    local ns="" existing=""
 
-    if [[ -n "$current" ]]; then
-        say >&2 "Namespaces actuales de '$name': $current"
-        say >&2 "Enter en el primero los conserva; escribir alguno los reemplaza."
+    for existing in $current; do
+        collected+=("$existing")
+    done
+
+    say >&2 "Namespaces de '$name', uno por línea."
+    if [[ ${#collected[@]} -gt 0 ]]; then
+        local c
+        for c in "${collected[@]}"; do
+            say >&2 "  actual: $c"
+        done
+        say >&2 "Escriba uno nuevo para AÑADIRLO, o -<namespace> para quitarlo."
+    else
+        say >&2 "Formato: host[:puerto]/propietario   Ej: github.com/mi-org"
     fi
 
-    say >&2 "Namespaces cuyos repositorios van a '$name', uno por línea."
-    say >&2 "Formato: host[:puerto]/propietario   Ej: github.com/mi-org"
-
     while :; do
-        local prompt="  Namespace de '$name'"
-        if [[ ${#collected[@]} -eq 0 ]]; then
-            prompt+=" (Enter para "
-            [[ -n "$current" ]] && prompt+="conservar los actuales): " || prompt+="ninguno): "
-        else
-            prompt+=" (Enter para terminar): "
-        fi
-
+        local prompt="  Namespace de '$name' (Enter para terminar): "
         read -r -p "$prompt" ns || true
+        [[ -z "$ns" ]] && break
 
-        if [[ -z "$ns" ]]; then
-            if [[ ${#collected[@]} -eq 0 && -n "$current" ]]; then
-                printf '%s' "$current"
-                return
+        # A leading "-" removes an entry instead of adding one.
+        if [[ "$ns" == -* ]]; then
+            local drop="${ns#-}" kept=() found="" c
+            for c in ${collected[@]+"${collected[@]}"}; do
+                if [[ "$c" == "$drop" ]]; then found=1; else kept+=("$c"); fi
+            done
+            if [[ -n "$found" ]]; then
+                collected=(${kept[@]+"${kept[@]}"})
+                say >&2 "  quitado: $drop"
+            else
+                say >&2 "  '$drop' no estaba en la lista."
             fi
-            break
+            continue
         fi
 
         local dup="" seen=""
