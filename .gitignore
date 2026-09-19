@@ -15,3 +15,7 @@ config/router.json
 # Screenshots dropped in the repo root — this repository is public.
 /*.png
 /*.jpg
+
+# Literal '$H' directories: an unexpanded variable in a test harness once made
+# the installer create one inside the repository.
+/$H/
