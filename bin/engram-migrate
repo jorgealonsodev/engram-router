@@ -61,15 +61,22 @@ done
 # The shim exports ENGRAM_DATA_DIR unconditionally, so every call below must
 # reach the real binary directly or it would be redirected mid-migration.
 resolve_real_engram() {
-    local self_dir stripped entry
-    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    stripped=""
+    # Walk PATH and take the first engram that is not the shim, identified by a
+    # marker inside the file rather than by its directory. Stripping only the
+    # caller's own directory was not enough: run from a clone before
+    # installing, that leaves the installed shim first in PATH, and the shim
+    # rewrites ENGRAM_DATA_DIR for the current repository — so a query about
+    # one instance silently answered about another, or was refused outright.
+    local entry candidate
     while IFS= read -r entry; do
         [[ -z "$entry" ]] && continue
-        [[ "$(cd "$entry" 2>/dev/null && pwd)" == "$self_dir" ]] && continue
-        stripped="${stripped:+$stripped:}$entry"
+        candidate="$entry/engram"
+        [[ -x "$candidate" ]] || continue
+        grep -q 'engram-router-shim' "$candidate" 2>/dev/null && continue
+        printf '%s' "$candidate"
+        return 0
     done < <(printf '%s' "${PATH:-}" | tr ':' '\n')
-    PATH="$stripped" command -v engram 2>/dev/null
+    return 1
 }
 
 REAL_ENGRAM="$(resolve_real_engram || true)"
@@ -89,6 +96,19 @@ TO_DIR="$(instance_data_dir "$TO" || true)"
 [[ -n "$TO_DIR"   ]] || die "la instancia '$TO' no está en $CONFIG_FILE."
 [[ -d "$FROM_DIR" ]] || die "el directorio de datos de '$FROM' no existe: $FROM_DIR"
 [[ -d "$TO_DIR"   ]] || die "el directorio de datos de '$TO' no existe: $TO_DIR"
+
+# Reads a labelled line from Engram's output. Engram has no machine-readable
+# status (`engram doctor --json` exists, `cloud status` has no equivalent), so
+# this has to parse text meant for humans. The one thing that must not happen
+# is mistaking "Engram no longer prints this label" for "the value is empty":
+# the first is a format change and the second is a real configuration problem,
+# and they need different messages. Absence is reported by returning 1.
+read_label() {
+    local text="$1" label="$2" line
+    line="$(printf '%s' "$text" | sed -n "s/^${label}:[[:space:]]*//p" | head -1)"
+    printf '%s' "$text" | grep -q "^${label}:" || return 1
+    printf '%s' "$line"
+}
 
 # Engram's own project detection: git remote first, then directory name.
 remote="$(git remote get-url origin 2>/dev/null || true)"
@@ -118,14 +138,20 @@ say "destino: $TO  ($TO_DIR)"
 # ---------------------------------------------------------------------------
 step 0 "Verificando el destino"
 dest_status="$(run_in "$TO_DIR" cloud status 2>&1 || true)"
-dest_server="$(printf '%s' "$dest_status" | sed -n 's/^Server:[[:space:]]*//p' | head -1)"
-dest_source="$(printf '%s' "$dest_status" | sed -n 's/^Server source:[[:space:]]*//p' | head -1)"
+
+if ! dest_source="$(read_label "$dest_status" 'Server source')"; then
+    die "Engram no ha impreso 'Server source' al consultar el destino.
+        O la consulta falló, o el formato de salida cambió en esta versión de
+        Engram y este script ya no puede leerlo. No se ha movido nada.
+        Compruebe a mano:  engram cloud status"
+fi
+dest_server="$(read_label "$dest_status" 'Server' || true)"
 
 say "servidor: ${dest_server:-<ninguno>}"
 say "origen del ajuste: ${dest_source:-<ninguno>}"
 
 [[ "$dest_source" == "cloud.json" ]] || die \
-"el destino no resuelve desde su cloud.json (origen: ${dest_source:-ninguno}).
+"el destino resuelve desde '$dest_source', no desde su cloud.json.
         Con ENGRAM_CLOUD_* en el entorno, esta migración empujaría al servidor
         equivocado. Retire esas variables y vuelva a intentarlo."
 [[ -n "$dest_server" ]] || die "el destino no tiene servidor configurado."
@@ -158,6 +184,14 @@ else
     out="$(run_in "$TO_DIR" sync --import 2>&1)"
     printf '%s\n' "$out" | sed 's/^/  /'
     imported="$(printf '%s' "$out" | sed -n 's/^[[:space:]]*Observations:[[:space:]]*//p' | head -1)"
+    # Neither the count nor the "nothing new" phrase appearing means the output
+    # no longer looks like Engram's. Said explicitly, because the fallback below
+    # would otherwise report an empty import and blame the data.
+    if [[ -z "$imported" ]] && ! printf '%s' "$out" | grep -q 'No new chunks to import'; then
+        say "AVISO: la salida del import no contiene ni un recuento de observaciones"
+        say "       ni el mensaje de 'nada nuevo'. Puede que el formato de Engram"
+        say "       haya cambiado; la comprobación por base de datos sigue siendo fiable."
+    fi
     printf '%s' "$out" | grep -q 'No new chunks to import' &&
         say "ya estaba importado (reejecución): se continúa."
 

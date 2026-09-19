@@ -134,11 +134,13 @@ Emerged after the original breakdown:
       with the server returning them on a pull afterwards.
 - [x] P2 README states the supported platforms, and records the Windows
       decision with its reasoning so it does not get re-derived.
-- [ ] P3 Two upstream defects observed and still unreported to
-      Gentleman-Programming/engram: `sync_state.target_key` carries no server
-      identity, which is latent silent data loss for anyone repointing an
-      install at a second server; and enrollment is a destination-blind
-      boolean. The first affects any user, not only a multi-cloud one.
+- [~] P3 DECLINED by the user: the two upstream defects will not be reported.
+      Recorded so the analysis is not redone. `sync_state.target_key` carries
+      no server identity, so acknowledgement cursors are reused across
+      different backends — latent silent data loss for anyone repointing an
+      install at a second server, not only a multi-cloud user. And enrollment
+      is a destination-blind boolean. The design here avoids both by never
+      repointing an instance: one instance per destination, always.
 - [x] P4 Per-machine setup moved out of this document and into `engram-doctor`,
       which reports environment pollution and each instance's real destination
       for whoever runs it.
@@ -152,9 +154,10 @@ Emerged while using it:
       replicates on its own. Decide whether autosync should be on per instance,
       remembering it is opt-in and that a resident daemon freezes its
       environment at exec.
-- [ ] P7 Three checks parse text meant for humans (`Server source:`,
-      `Observations:`, `No new chunks to import`). `engram-doctor` warns on
-      version drift, but the real fix is a machine-readable status upstream.
+- [x] P7 Parsing text meant for humans is unavoidable — `engram doctor --json`
+      exists but `cloud status` has no equivalent — so it now fails honestly:
+      a missing label is reported as a possible format change rather than as a
+      configuration problem, and `engram-doctor` warns on version drift.
 - [ ] P8 With more than one contributor, commits should stop going straight to
       `main`: a branch and a pull request per change, especially for a tool
       whose failures are silent.

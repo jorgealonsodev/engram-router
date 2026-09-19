@@ -27,14 +27,22 @@ _self_dir() {
 # routes to, not the one being checked. Every instance would report the same
 # destination — which it did, until this existed.
 _real_engram() {
-    local stripped entry
-    stripped=""
+    # Walk PATH and take the first engram that is not the shim, identified by a
+    # marker inside the file rather than by its directory. Stripping only the
+    # caller's own directory was not enough: run from a clone before
+    # installing, that leaves the installed shim first in PATH, and the shim
+    # rewrites ENGRAM_DATA_DIR for the current repository — so a query about
+    # one instance silently answered about another, or was refused outright.
+    local entry candidate
     while IFS= read -r entry; do
         [[ -z "$entry" ]] && continue
-        [[ "$(cd "$entry" 2>/dev/null && pwd)" == "$SHIM_DIR" ]] && continue
-        stripped="${stripped:+$stripped:}$entry"
+        candidate="$entry/engram"
+        [[ -x "$candidate" ]] || continue
+        grep -q 'engram-router-shim' "$candidate" 2>/dev/null && continue
+        printf '%s' "$candidate"
+        return 0
     done < <(printf '%s' "${PATH:-}" | tr ':' '\n')
-    PATH="$stripped" command -v engram 2>/dev/null
+    return 1
 }
 
 _find_router_lib() {

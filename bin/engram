@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# engram-router-shim: identifies this file to the other tools, which must
+# reach the real Engram binary and never each other through PATH.
 # bin/engram — PATH shim that routes Engram operations to the correct
 # ENGRAM_DATA_DIR for the current repository, then execs the real binary.
 #
