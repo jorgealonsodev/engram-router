@@ -317,8 +317,28 @@ Everything else is on firmer ground. `ENGRAM_DATA_DIR` is documented in
 `sync --import` are public subcommands. The shim and the routing depend on
 none of it: they set `ENGRAM_DATA_DIR` and exec the real binary.
 
-After upgrading Engram, run `engram-doctor` and check that each instance shows
-its server before trusting a migration.
+After upgrading Engram, run the contract tests:
+
+```sh
+bash tests/test_engram_contract.sh
+```
+
+They exercise every assumption this tool makes about Engram against the Engram
+that is installed: data-directory isolation, the `cloud.json` key and its
+precedence, the labels that get parsed, the HTTPS requirement, enrollment
+having no server column, export/import round-tripping and staying idempotent,
+and the `observations` columns the counts rely on. Each failure names a
+behaviour that was verified once and has changed since.
+
+Everything they create lives in a temporary directory and the real binary is
+resolved directly, so the shim cannot redirect them and no configured instance
+is read or written.
+
+`tests/test_router.sh` is the other half: it covers this tool's own logic with
+no Engram involved at all.
+
+Then run `engram-doctor` and check each instance still shows its own server
+before trusting a migration.
 
 ## Diagnosing
 
