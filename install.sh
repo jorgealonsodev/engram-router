@@ -236,8 +236,32 @@ ask_namespaces_for() {
         else
             prompt="  Otro prefijo, o Enter si ya no quiere más: "
         fi
-        read -r -p "$prompt" ns || true
+        # Cleared before each read and broken on failure: read leaves the
+        # previous value in place at EOF, so a validation retry loop would
+        # otherwise spin forever once input ran out.
+        ns=""
+        read -r -p "$prompt" ns || break
         [[ -z "$ns" ]] && break
+
+        # Validated against the reflex errors: pasting the whole clone URL,
+        # keeping the .git suffix, or including the repository name. All three
+        # produce a prefix that can never match a normalized remote, and the
+        # only symptom would be a repository silently not routing.
+        if [[ "$ns" != -* ]]; then
+            local bad=""
+            case "$ns" in
+                *://*)   bad="no incluya el esquema: escriba '${ns#*://}' en vez de '$ns'" ;;
+                *.git)   bad="no incluya '.git': escriba '${ns%.git}' en vez de '$ns'" ;;
+                */*/*/*) bad="sobra parte de la ruta: use solo host[:puerto]/propietario" ;;
+            esac
+            if [[ -z "$bad" && ! "$ns" =~ ^[A-Za-z0-9._-]+(:[0-9]+)?/[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)?$ ]]; then
+                bad="formato no válido. Debe ser host[:puerto]/propietario, p.ej. github.com/mi-org"
+            fi
+            if [[ -n "$bad" ]]; then
+                say >&2 "  $bad"
+                continue
+            fi
+        fi
 
         # A leading "-" removes an entry instead of adding one.
         if [[ "$ns" == -* ]]; then
@@ -280,9 +304,29 @@ ask_one_instance() {
     say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
     say "  instalación de Engram que ya exista para reutilizar sus memorias."
     say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
-    read -r -p "  Carpeta [Enter = $default_dir]: " dir || true
-    dir="${dir:-$default_dir}"
-    dir="${dir/#\~/$HOME}"
+    while :; do
+        dir=""
+        read -r -p "  Carpeta [Enter = $default_dir]: " dir || dir=""
+        dir="${dir:-$default_dir}"
+        dir="${dir/#\~/$HOME}"
+        # Caught early because mkdir would otherwise abort the whole install
+        # several steps later, after credentials had already been typed.
+        if [[ -e "$dir" && ! -d "$dir" ]]; then
+            say "  '$dir' existe y no es una carpeta. Elija otra ruta."
+            dir=""
+            continue
+        fi
+        if [[ ! -e "$dir" ]]; then
+            local parent="$dir"
+            while [[ ! -e "$parent" && "$parent" != "/" ]]; do parent="$(dirname "$parent")"; done
+            if [[ ! -w "$parent" ]]; then
+                say "  No hay permiso de escritura en '$parent'. Elija otra ruta."
+                dir=""
+                continue
+            fi
+        fi
+        break
+    done
 
     # Reusing an existing installation root keeps its memories, its enrollments
     # and its sync cursors; a fresh directory silently starts from an empty
@@ -385,8 +429,15 @@ ask_instances() {
         say "  3) Modificar una existente  (cambiar su carpeta o sus namespaces)"
         say "  4) Empezar de cero  (descarta lo de arriba y vuelve a preguntarlo todo)"
         local choice=""
-        read -r -p "Escriba 1, 2, 3 o 4 — o pulse Enter para la opción 1: " choice || true
-        choice="${choice:-1}"
+        while :; do
+            choice=""
+            read -r -p "Escriba 1, 2, 3 o 4 — o pulse Enter para la opción 1: " choice || choice=1
+            choice="${choice:-1}"
+            case "$choice" in
+                1|2|3|4) break ;;
+                *) say "  '$choice' no es una opción. Escriba 1, 2, 3 o 4." ;;
+            esac
+        done
 
         local i
         case "$choice" in
@@ -447,12 +498,6 @@ ask_instances() {
                 return
                 ;;
             4) say "Se descarta la configuración anterior." ;;
-            *) say "Opción no reconocida: se conserva la configuración."
-               for i in "${!INSTALLED_NAMES[@]}"; do
-                   push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
-               done
-               return
-               ;;
         esac
     fi
 
@@ -544,7 +589,21 @@ provision_instance() {
     local server=""
     say "URL del Engram Cloud de '$name'. Debe empezar por https:// — Engram se"
     say "niega a enviar el token por HTTP sin cifrar."
-    read -r -p "  URL (ej: https://engram.miempresa.com): " server || true
+    # Engram refuses to send a bearer token over plain HTTP, verified against
+    # v2.0.0, so an http:// destination could never sync. Rejected here rather
+    # than on the first push, when the token has already been typed.
+    while :; do
+        server=""
+        read -r -p "  URL (ej: https://engram.miempresa.com): " server || break
+        [[ -z "$server" ]] && break
+        case "$server" in
+            https://?*) break ;;
+            http://*)   say "  Debe ser https://. Engram no envía el token por HTTP sin cifrar." ;;
+            *://*)      say "  Esquema no admitido. Use https://" ;;
+            *)          say "  Falta el esquema. Escriba la URL completa, empezando por https://" ;;
+        esac
+    done
+
     if [[ -z "$server" ]]; then
         say "URL vacía: '$name' queda SIN destino y no podrá sincronizar."
         say "Vuelva a ejecutar este instalador cuando tenga la URL."
