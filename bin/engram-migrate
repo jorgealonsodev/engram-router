@@ -7,9 +7,12 @@
 # the source unenroll leaves the project replicating to both, and following
 # Engram's own "git add .engram/" hint commits the memories themselves.
 #
-# Order matters and is enforced here: verify, export, import, verify again,
-# enroll, push, unenroll, clean. Enrolling before importing would enroll a
-# project with no observations and look like it worked.
+# Order matters and is enforced here: verify, pull, export, import, verify
+# again, enroll, push, unenroll, clean. Enrolling before importing would
+# enroll a project with no observations and look like it worked. Pulling
+# before exporting matters just as much: a source that never pulled its own
+# cloud can hold less than that cloud does, and exporting only the local copy
+# would leave the difference stranded on the old server.
 #
 # Run this from inside the repository being migrated, BEFORE a routing rule
 # sends it to the destination instance: the shim exports ENGRAM_DATA_DIR
@@ -21,7 +24,7 @@ ENGRAM_ROUTER_LIB_DIR="${ENGRAM_ROUTER_LIB_DIR:-$HOME/.local/lib/engram-router}"
 CONFIG_DIR="${ENGRAM_ROUTER_CONFIG_DIR:-$HOME/.config/engram-router}"
 CONFIG_FILE="$CONFIG_DIR/router.json"
 
-FROM=""; TO=""; DRY_RUN=0; ASSUME_YES=0; KEEP_SOURCE=0; CLEAN_CHUNKS=0
+FROM=""; TO=""; DRY_RUN=0; ASSUME_YES=0; KEEP_SOURCE=0; CLEAN_CHUNKS=0; SKIP_SOURCE_PULL=0
 
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n[%s] %s\n' "$1" "$2"; }
@@ -42,6 +45,9 @@ Ejecútelo DENTRO del repositorio que quiere migrar.
   --clean-chunks           Borra los chunks exportados al terminar.
                            IRREVERSIBLE: el origen no los regenera, así que
                            esta migración ya no se podrá repetir.
+  --skip-source-pull       Omite traer del cloud de origen antes de exportar.
+                           ARRIESGADO: lo que solo exista en ese cloud no se
+                           migrará y quedará huérfano allí.
   --yes                    No pedir confirmación.
 USAGE
 }
@@ -53,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=1; shift ;;
         --keep-source-enrolled) KEEP_SOURCE=1; shift ;;
         --clean-chunks) CLEAN_CHUNKS=1; shift ;;
+        --skip-source-pull) SKIP_SOURCE_PULL=1; shift ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'Opción desconocida: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -242,9 +249,33 @@ if [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 1 — export. Project-scoped: only this project leaves the source.
+# Step 1 — pull the source's own cloud into it before exporting. Without
+# this, only what already reached the source's local database gets exported;
+# anything that lives solely on the source's cloud (from another machine, or
+# a previous migration) is silently left behind. A source with no cloud.json
+# has never had a cloud to fall behind, so that case proceeds instead of
+# blocking a legitimate local-only migration; any other failure blocks.
 # ---------------------------------------------------------------------------
-step 1 "Exportando desde '$FROM'"
+step 1 "Trayendo del cloud de origen"
+if [[ $DRY_RUN -eq 1 ]]; then
+    say "(simulado) engram sync --import --cloud --project $PROJECT"
+elif [[ ! -r "$FROM_DIR/cloud.json" ]]; then
+    say "origen sin cloud.json: no hay nube de la que traer nada."
+elif [[ $SKIP_SOURCE_PULL -eq 1 ]]; then
+    say "AVISO: --skip-source-pull activo, no se comprueba el cloud de origen."
+    say "       Lo que solo exista allí quedará huérfano, sin migrar."
+else
+    run_in "$FROM_DIR" sync --import --cloud --project "$PROJECT" 2>&1 | sed 's/^/  /' ||
+        die "no se pudo traer del cloud de origen ('$FROM'): puede no estar
+        enrolado, el servidor puede estar inaccesible, o el comando falló
+        (vea la salida de arriba). No se ha exportado nada. Si de verdad no
+        hace falta nada del cloud de origen, repita con --skip-source-pull."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2 — export. Project-scoped: only this project leaves the source.
+# ---------------------------------------------------------------------------
+step 2 "Exportando desde '$FROM'"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) engram sync"
 else
@@ -254,10 +285,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2 and 3 — import, then check the counts agree before anything is
+# Step 3 and 4 — import, then check the counts agree before anything is
 # pushed. Import is idempotent, so a re-run reports zero new chunks.
 # ---------------------------------------------------------------------------
-step 2 "Importando en '$TO'"
+step 3 "Importando en '$TO'"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) engram sync --import"
 else
@@ -275,7 +306,7 @@ else
     printf '%s' "$out" | grep -q 'No new chunks to import' &&
         say "ya estaba importado (reejecución): se continúa."
 
-    step 3 "Comprobando las cuentas"
+    step 4 "Comprobando las cuentas"
     # Count what a project-scoped export actually carries, which is narrower
     # than "every row of this project" in two ways, each of which produced a
     # false abort before it was accounted for:
@@ -305,16 +336,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 and 5 — enroll only now that the data is there, then push.
+# Step 5 and 6 — enroll only now that the data is there, then push.
 # ---------------------------------------------------------------------------
-step 4 "Enrolando '$PROJECT' en '$TO'"
+step 5 "Enrolando '$PROJECT' en '$TO'"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) engram cloud enroll $PROJECT"
 else
     run_in "$TO_DIR" cloud enroll "$PROJECT" 2>&1 | sed 's/^/  /' || true
 fi
 
-step 5 "Empujando a $dest_server"
+step 6 "Empujando a $dest_server"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) engram sync --cloud --project $PROJECT"
 else
@@ -324,10 +355,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 6 — stop the source replicating. Last on purpose: until the push
+# Step 7 — stop the source replicating. Last on purpose: until the push
 # succeeded, the source copy was the only one reaching a cloud.
 # ---------------------------------------------------------------------------
-step 6 "Desenrolando '$PROJECT' en '$FROM'"
+step 7 "Desenrolando '$PROJECT' en '$FROM'"
 if [[ $KEEP_SOURCE -eq 1 ]]; then
     say "omitido por --keep-source-enrolled: seguirá replicando en '$FROM'."
 elif [[ $DRY_RUN -eq 1 ]]; then
@@ -338,7 +369,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7 — the chunks are memories in portable form and Engram suggests
+# Step 8 — the chunks are memories in portable form and Engram suggests
 # committing them, which would publish their contents to everyone with
 # repository access. Ignore them; do NOT delete them.
 #
@@ -348,7 +379,7 @@ fi
 # `engram sync --all`, which exports every project at once — measured at 6594
 # observations where one project needed 1139.
 # ---------------------------------------------------------------------------
-step 7 "Protegiendo los chunks exportados"
+step 8 "Protegiendo los chunks exportados"
 if [[ $DRY_RUN -eq 1 ]]; then
     say "(simulado) añadir .engram/chunks/ a .gitignore"
 elif [[ $CLEAN_CHUNKS -eq 1 ]]; then
