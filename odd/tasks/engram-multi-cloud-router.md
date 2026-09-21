@@ -116,8 +116,8 @@ Emerged after the original breakdown:
       The preflight stopped correctly on ENGRAM_CLOUD_*, but its own
       instructions ("delete those lines") destroyed the only copy of the
       token without ever checking. Measured: ~/.engram/cloud.json held an
-      empty token and the live value existed only at .bashrc:148 and
-      .profile:32. Chosen scope: WARN ONLY, writing no credential to disk.
+      empty token and the live value existed only in two shell startup files.
+      Chosen scope: WARN ONLY, writing no credential to disk.
       Commits 8276aa0, 45399bd.
       Review lineage review-693ed30b7dbc1a9a, approved, acknowledgement
       burned. Two CRITICAL findings, both fixed in 981d05a: the survivor
@@ -193,8 +193,8 @@ Emerged while using it:
       when sqlite3 is missing or the file will not parse.
       Commits e209dce, cd05400. Evidence: 29/29 on the new suite, 35/35
       router, 32/32 token warning, 19/19 contract against real Engram 2.0.0,
-      shellcheck clean, and the read-only queries run against the live
-      63.5 MB database (3373 observations, 35 projects) with its WAL
+      shellcheck clean, and the read-only queries run against a live
+      multi-megabyte database held open by a running daemon, with its WAL
       untouched.
       Review lineage review-1cf22636190b081b, approved, acknowledgement
       burned. It caught one CRITICAL from two lenses: the no-default prompt

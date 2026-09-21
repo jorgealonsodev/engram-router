@@ -155,7 +155,7 @@ echo "== (a) token only in dotfiles, no surviving copy =="
 
 FIXTURE_A="$(mktemp -d)"
 mkdir -p "$FIXTURE_A/.engram"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": ""\n}\n' > "$FIXTURE_A/.engram/cloud.json"
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": ""\n}\n' > "$FIXTURE_A/.engram/cloud.json"
 {
     echo '# .bashrc'
     echo 'export ENGRAM_CLOUD_TOKEN=only-copy-abc'
@@ -198,7 +198,7 @@ echo "== (b) non-empty surviving copy -> no credential-loss warning =="
 
 FIXTURE_B1="$(mktemp -d)"
 mkdir -p "$FIXTURE_B1/.engram"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "surviving-xyz"\n}\n' > "$FIXTURE_B1/.engram/cloud.json"
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": "surviving-xyz"\n}\n' > "$FIXTURE_B1/.engram/cloud.json"
 {
     echo '# .bashrc'
     echo 'export ENGRAM_CLOUD_TOKEN=surviving-xyz'
@@ -216,7 +216,7 @@ rm -rf "$FIXTURE_B1"
 
 FIXTURE_B2="$(mktemp -d)"
 mkdir -p "$FIXTURE_B2/.config/engram-router" "$FIXTURE_B2/.local/share/engram-work"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "instance-token-99"\n}\n' \
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": "instance-token-99"\n}\n' \
     > "$FIXTURE_B2/.local/share/engram-work/cloud.json"
 cat > "$FIXTURE_B2/.config/engram-router/router.json" <<'JSON'
 {
@@ -255,7 +255,7 @@ echo "== (b3) a different stored token is NOT a survivor =="
 
 FIXTURE_B3="$(mktemp -d)"
 mkdir -p "$FIXTURE_B3/.engram"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "stale-token-from-last-year"\n}\n' \
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": "stale-token-from-last-year"\n}\n' \
     > "$FIXTURE_B3/.engram/cloud.json"
 {
     echo '# .bashrc'
@@ -311,7 +311,7 @@ assert_no_match "(d/env-only) false unset-environment claim removed" "$FALSE_CLA
 
 FIXTURE_D="$(mktemp -d)"
 mkdir -p "$FIXTURE_D/.engram"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": ""\n}\n' > "$FIXTURE_D/.engram/cloud.json"
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": ""\n}\n' > "$FIXTURE_D/.engram/cloud.json"
 {
     echo '# .bashrc'
     echo 'export ENGRAM_CLOUD_TOKEN=only-copy-def'
@@ -381,7 +381,7 @@ echo "== (f) a symlinked dotfile targets its resolved file =="
 
 FIXTURE_F="$(mktemp -d)"
 mkdir -p "$FIXTURE_F/.engram" "$FIXTURE_F/dotfiles"
-printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "survivor-xyz"\n}\n' \
+printf '{\n  "server_url": "https://engram.your-org.example",\n  "token": "survivor-xyz"\n}\n' \
     > "$FIXTURE_F/.engram/cloud.json"
 printf '# managed\nexport ENGRAM_CLOUD_TOKEN=survivor-xyz\n' > "$FIXTURE_F/dotfiles/bashrc"
 ln -s "$FIXTURE_F/dotfiles/bashrc" "$FIXTURE_F/.bashrc"
