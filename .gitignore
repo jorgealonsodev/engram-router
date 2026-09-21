@@ -19,3 +19,6 @@ config/router.json
 # Literal '$H' directories: an unexpanded variable in a test harness once made
 # the installer create one inside the repository.
 /$H/
+
+# Engram memories in portable form — never commit these.
+.engram/chunks/
