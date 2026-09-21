@@ -96,6 +96,7 @@ Los ficheros ya están limpios: solo queda una sesión antigua.
   3. Vuelva a ejecutar este instalador.
 EOF
         else
+            _warn_token_loss_if_needed
             cat <<'EOF'
 Cómo resolverlo antes de reintentar:
   1. Elimine o comente las líneas ENGRAM_CLOUD_* en los ficheros de arriba.
@@ -114,6 +115,157 @@ EOF
         exit 1
     fi
     say "OK: no se han encontrado exportaciones ENGRAM_CLOUD_* peligrosas."
+}
+
+# ---------------------------------------------------------------------------
+# Step 1a — token-survival check: only reached from the "files present"
+# remediation branch above, whose step 1 tells the user to delete the
+# ENGRAM_CLOUD_* lines. If ENGRAM_CLOUD_TOKEN is live in this session and no
+# other non-empty copy exists (~/.engram/cloud.json or an already-provisioned
+# instance's cloud.json), following that instruction destroys the credential
+# irrecoverably. This check never writes anything and never prints the token
+# value itself — only locations.
+# ---------------------------------------------------------------------------
+
+# _cloud_json_token CLOUD_JSON_PATH
+# Prints the "token" field of a flat cloud.json (same shape read by
+# bin/engram-router::_instance_cloud_server), or fails if the file is
+# unreadable, malformed, or the field is empty.
+_cloud_json_token() {
+    local cloud_json="$1" content
+    [[ -r "$cloud_json" ]] || return 1
+    content="$(cat "$cloud_json" 2>/dev/null)" || return 1
+    local -A obj=()
+    _router_json_parse_flat_object "$content" 0 obj 2>/dev/null || return 1
+    local token="${obj[token]:-}"
+    [[ -n "$token" ]] || return 1
+    printf '%s\n' "$token"
+}
+
+# _load_router_lib_best_effort
+# Sources lib/router.sh (installed copy first, repo copy as fallback — same
+# pattern as load_existing_config) so _router_json_parse_flat_object and
+# router_expand_path are available. Never fatal: callers degrade gracefully
+# when neither copy can be sourced.
+_load_router_lib_best_effort() {
+    # shellcheck source=lib/router.sh
+    source "$LIB_DIR/router.sh" 2>/dev/null && return 0
+    # shellcheck source=lib/router.sh
+    source "$SCRIPT_DIR/lib/router.sh" 2>/dev/null && return 0
+    return 1
+}
+
+# _token_definition_locations
+# Prints "file:line" for each line that defines ENGRAM_CLOUD_TOKEN
+# specifically, across the same files the hazard scan above already reads.
+_token_definition_locations() {
+    local f
+    for f in "${DOTFILES_TO_SCAN[@]}"; do
+        [[ -r "$f" ]] || continue
+        # "|| true": grep exits 1 on no match, which under pipefail would
+        # otherwise abort this loop early (set -e) and skip the remaining
+        # files instead of just reporting an empty result for this one.
+        grep -nE '^\s*(export\s+)?ENGRAM_CLOUD_TOKEN=' "$f" 2>/dev/null \
+            | while IFS=: read -r lineno _; do printf '%s:%s\n' "$f" "$lineno"; done || true
+    done
+    for f in "$HOME"/.config/environment.d/*.conf; do
+        [[ -e "$f" ]] || continue
+        grep -nE '^\s*ENGRAM_CLOUD_TOKEN=' "$f" 2>/dev/null \
+            | while IFS=: read -r lineno _; do printf '%s:%s\n' "$f" "$lineno"; done || true
+    done
+}
+
+# _survey_token_copies
+# Checks $HOME/.engram/cloud.json and every already-provisioned instance's
+# cloud.json (per router.json, if any) for a non-empty token. Prints one
+# line per location actually checked, prefixed SURVIVING:, EMPTY:, or
+# MISSING:, so the caller can report exactly what it found — never a guess.
+_survey_token_copies() {
+    # Loaded once, up front: _cloud_json_token below needs
+    # _router_json_parse_flat_object regardless of which path it checks, and
+    # this runs before install_files ever puts a copy of the library in
+    # place, so the repo copy is very often the only one available yet.
+    _load_router_lib_best_effort || true
+
+    local cj="$HOME/.engram/cloud.json"
+    if [[ ! -e "$cj" ]]; then
+        printf 'MISSING:%s\n' "$cj"
+    elif _cloud_json_token "$cj" >/dev/null 2>&1; then
+        printf 'SURVIVING:%s\n' "$cj"
+    else
+        printf 'EMPTY:%s\n' "$cj"
+    fi
+
+    [[ -r "$CONFIG_FILE" ]] || return 0
+    _load_router_lib_best_effort || return 0
+    declare -f router_load_config >/dev/null 2>&1 || return 0
+    router_load_config "$CONFIG_FILE" 2>/dev/null || return 0
+    [[ ${#INSTANCE_NAMES[@]} -gt 0 ]] || return 0
+
+    local name data_dir icj
+    for name in "${INSTANCE_NAMES[@]}"; do
+        data_dir="$(router_expand_path "${INSTANCE_DATA_DIR[$name]}")"
+        icj="$data_dir/cloud.json"
+        if [[ ! -e "$icj" ]]; then
+            printf 'MISSING:%s (instancia %s)\n' "$icj" "$name"
+        elif _cloud_json_token "$icj" >/dev/null 2>&1; then
+            printf 'SURVIVING:%s (instancia %s)\n' "$icj" "$name"
+        else
+            printf 'EMPTY:%s (instancia %s)\n' "$icj" "$name"
+        fi
+    done
+}
+
+# _warn_token_loss_if_needed
+# Only relevant when ENGRAM_CLOUD_TOKEN is live in the environment right now
+# (see header comment). If no surviving non-empty copy exists anywhere,
+# prints a prominent warning naming the exact file:line locations and what
+# was checked, BEFORE the numbered remediation steps. If a surviving copy
+# exists, says so briefly instead. Never prints the token value.
+_warn_token_loss_if_needed() {
+    compgen -e | grep -qx 'ENGRAM_CLOUD_TOKEN' || return 0
+
+    local -a token_locs=()
+    local loc
+    while IFS= read -r loc; do
+        [[ -n "$loc" ]] && token_locs+=("$loc")
+    done < <(_token_definition_locations)
+
+    local -a surviving=() checked=()
+    while IFS= read -r loc; do
+        [[ -n "$loc" ]] || continue
+        case "$loc" in
+            SURVIVING:*) surviving+=("${loc#SURVIVING:}") ;;
+            EMPTY:*)     checked+=("${loc#EMPTY:} (sin token)") ;;
+            MISSING:*)   checked+=("${loc#MISSING:} (no existe)") ;;
+        esac
+    done < <(_survey_token_copies)
+
+    if [[ ${#surviving[@]} -gt 0 ]]; then
+        printf 'AVISO: se ha encontrado otra copia del token, no vacía:\n'
+        printf '  - %s\n' "${surviving[@]}"
+        printf 'Puede continuar con seguridad: esa copia sobrevive aunque se borren\nlas líneas de arriba.\n\n'
+        return 0
+    fi
+
+    printf '\n*** AVISO: ESA LÍNEA ES LA ÚNICA COPIA DEL TOKEN ***\n\n'
+    if [[ ${#token_locs[@]} -gt 0 ]]; then
+        printf 'ENGRAM_CLOUD_TOKEN está definido únicamente en:\n'
+        printf '  - %s\n' "${token_locs[@]}"
+    else
+        printf 'ENGRAM_CLOUD_TOKEN está activo en esta sesión, pero no se ha podido\n'
+        printf 'localizar la línea exacta que lo define.\n'
+    fi
+    printf '\n'
+    if [[ ${#checked[@]} -gt 0 ]]; then
+        printf 'Comprobado y sin token utilizable:\n'
+        printf '  - %s\n' "${checked[@]}"
+        printf '\n'
+    fi
+    printf 'GUARDE el valor del token (por ejemplo, en un gestor de contraseñas)\n'
+    printf 'ANTES del paso 1 de abajo. Si borra esas líneas sin haberlo guardado,\n'
+    printf 'tendrá que emitir un token nuevo en el servidor: no hay forma de\n'
+    printf 'recuperar el valor actual.\n\n'
 }
 
 # ---------------------------------------------------------------------------
