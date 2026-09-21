@@ -80,6 +80,9 @@ namespace rather than the organization the tool serves; transferable later with
 
 Supported platforms: Linux and macOS. Windows was evaluated and declined.
 
+RDD: ON as of 2026-09-21 (decided by global), so native review now runs on
+work-unit commits. The note below about RDD being off describes 2026-09-19.
+
 TDD mode: unresolved for this workspace, so no RED-before-GREEN evidence is
 claimed. Verification is by unit tests on remote parsing, shellcheck, and
 fixture-HOME smoke tests of the installer and uninstaller paths. RDD is off,
@@ -107,6 +110,22 @@ corrections, each a single already-understood file.
       Commit 3d9c156.
 
 Emerged after the original breakdown:
+
+- [x] T11 Preflight: avisar antes de destruir la única copia del token.
+      El preflight se paraba correctamente ante ENGRAM_CLOUD_*, pero sus
+      propias instrucciones ("elimine esas líneas") destruían la única copia
+      del token sin comprobarlo nunca. Medido: ~/.engram/cloud.json con token
+      vacío, y el valor vivo solo en .bashrc:148 y .profile:32. Alcance
+      elegido: SOLO AVISAR, sin escribir credenciales a disco. Commits
+      8276aa0, 45399bd. Revisión nativa: dos hallazgos CRITICAL, corregidos
+      en 981d05a — la comprobación de supervivencia era por presencia y no
+      por identidad (fail-open: un token distinto hacía decir "puede
+      continuar con seguridad"), y el README afirmaba que ~/.engram/cloud.json
+      no se lee cuando el mismo cambio lo lee.
+      Evidencia: 35/35 router, 19/19 contrato contra Engram 2.0.0 real,
+      32/32 test nuevo con HOME de fixture y checksum del $HOME real,
+      shellcheck limpio, y ./install.sh sobre el caso real de la máquina.
+      Revisión: lineage review-693ed30b7dbc1a9a, aprobada y acuse quemado.
 
 - [x] T7 Fix cloud.json key — install.sh wrote "server"; Engram reads
       "server_url". Evidence: measured both against engram v2.0.0 with a clean
@@ -158,6 +177,12 @@ Emerged while using it:
       exists but `cloud status` has no equivalent — so it now fails honestly:
       a missing label is reported as a possible format change rather than as a
       configuration problem, and `engram-doctor` warns on version drift.
+- [ ] P9 The default data-directory answer starts an instance on an empty
+      database while an existing install's memories stay in ~/.engram,
+      unreferenced. Nothing fails and nothing warns. Documented in the README
+      (cdaeb31, 981d05a); consider whether the installer should detect an
+      existing Engram root and offer it rather than only accept it typed.
+
 - [ ] P8 With more than one contributor, commits should stop going straight to
       `main`: a branch and a pull request per change, especially for a tool
       whose failures are silent.
