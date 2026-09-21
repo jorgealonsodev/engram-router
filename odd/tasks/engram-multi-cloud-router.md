@@ -154,11 +154,10 @@ Emerged while using it:
       `copobrasil.com` and `vioncasbake206` read as personal and are not.
       All five had been replicating to the personal cloud since August.
       Counts matched on every migration (25·25, 11·11, 24·24, 2·2, 6·6) and
-      each reached engram.etic.cloud at 1/1 chunks, pending 0. Seven projects
+      each reached the work cloud at 1/1 chunks, pending 0. Seven projects
       remain in `personal` and every one of them is genuinely personal.
-- [x] P6 Both instances now autosync: trabajo on 7437 to engram.etic.cloud,
-      personal on 7438 to engram.xdev.es, both units enabled so they survive a
-      reboot. Neither daemon carries ENGRAM_CLOUD_SERVER or ENGRAM_CLOUD_TOKEN;
+- [x] P6 Both instances now autosync, each on its own port and each to its
+      own server, with both units enabled so they survive a reboot. Neither daemon carries ENGRAM_CLOUD_SERVER or ENGRAM_CLOUD_TOKEN;
       each reads its own cloud.json, which is the whole mechanism working.
       Enabling the second one is what exposed T12 below.
 - [x] P7 Parsing text meant for humans is unavoidable — `engram doctor --json`
