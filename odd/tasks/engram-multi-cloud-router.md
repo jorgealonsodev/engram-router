@@ -80,13 +80,14 @@ namespace rather than the organization the tool serves; transferable later with
 
 Supported platforms: Linux and macOS. Windows was evaluated and declined.
 
-RDD: ON as of 2026-09-21 (decided by global), so native review now runs on
-work-unit commits. The note below about RDD being off describes 2026-09-19.
-
 TDD mode: unresolved for this workspace, so no RED-before-GREEN evidence is
 claimed. Verification is by unit tests on remote parsing, shellcheck, and
-fixture-HOME smoke tests of the installer and uninstaller paths. RDD is off,
-so no native review ran and none is claimed.
+fixture-HOME smoke tests of the installer and uninstaller paths.
+
+RDD was off through 2026-09-19, so T1-T10 carry no native review and none is
+claimed for them. It has been on since 2026-09-21, decided globally; every
+work-unit commit from T11 onwards went through it, and each task records its
+lineage and outcome.
 
 ## Tasks
 
@@ -111,21 +112,23 @@ corrections, each a single already-understood file.
 
 Emerged after the original breakdown:
 
-- [x] T11 Preflight: avisar antes de destruir la única copia del token.
-      El preflight se paraba correctamente ante ENGRAM_CLOUD_*, pero sus
-      propias instrucciones ("elimine esas líneas") destruían la única copia
-      del token sin comprobarlo nunca. Medido: ~/.engram/cloud.json con token
-      vacío, y el valor vivo solo en .bashrc:148 y .profile:32. Alcance
-      elegido: SOLO AVISAR, sin escribir credenciales a disco. Commits
-      8276aa0, 45399bd. Revisión nativa: dos hallazgos CRITICAL, corregidos
-      en 981d05a — la comprobación de supervivencia era por presencia y no
-      por identidad (fail-open: un token distinto hacía decir "puede
-      continuar con seguridad"), y el README afirmaba que ~/.engram/cloud.json
-      no se lee cuando el mismo cambio lo lee.
-      Evidencia: 35/35 router, 19/19 contrato contra Engram 2.0.0 real,
-      32/32 test nuevo con HOME de fixture y checksum del $HOME real,
-      shellcheck limpio, y ./install.sh sobre el caso real de la máquina.
-      Revisión: lineage review-693ed30b7dbc1a9a, aprobada y acuse quemado.
+- [x] T11 Preflight: warn before destroying the only copy of the token.
+      The preflight stopped correctly on ENGRAM_CLOUD_*, but its own
+      instructions ("delete those lines") destroyed the only copy of the
+      token without ever checking. Measured: ~/.engram/cloud.json held an
+      empty token and the live value existed only at .bashrc:148 and
+      .profile:32. Chosen scope: WARN ONLY, writing no credential to disk.
+      Commits 8276aa0, 45399bd.
+      Review lineage review-693ed30b7dbc1a9a, approved, acknowledgement
+      burned. Two CRITICAL findings, both fixed in 981d05a: the survivor
+      check tested presence rather than identity, so a different stored
+      token made it answer "puede continuar con seguridad" right before the
+      user deleted the live one — fail-open in the feature written to be
+      fail-safe; and the README asserted that ~/.engram/cloud.json is never
+      read while the same change read it.
+      Evidence: 35/35 router, 19/19 contract against real Engram 2.0.0,
+      32/32 on the new suite with a fixture HOME and a real-$HOME checksum,
+      shellcheck clean, and ./install.sh against this machine's real case.
 
 - [x] T7 Fix cloud.json key — install.sh wrote "server"; Engram reads
       "server_url". Evidence: measured both against engram v2.0.0 with a clean
