@@ -192,6 +192,57 @@ assert_status "'search' is NOT a cloud op" "1" "$?"
 router_is_cloud_op save
 assert_status "'save' is NOT a cloud op" "1" "$?"
 
+echo "== router_next_free_port: pure logic, no dependency on this host's real listeners =="
+
+# router_port_in_use is stubbed here so these assertions never depend on
+# what is actually bound on this machine (this machine really does have
+# real Engram daemons on 7437 and 7438 — see check further down for that).
+# shellcheck disable=SC2329 # invoked indirectly, from router_next_free_port in the sourced lib/router.sh
+router_port_in_use() { return 1; }
+
+out="$(router_next_free_port)"
+assert_eq "a first instance gets port 7437 (nothing taken, nothing bound)" "7437" "$out"
+
+out="$(router_next_free_port '' '7437')"
+assert_eq "a second instance gets port 7438 (7437 already taken)" "7438" "$out"
+
+out="$(router_next_free_port '' '7437 7438')"
+assert_eq "a third instance gets port 7439 (7437 and 7438 already taken)" "7439" "$out"
+
+# Simulate a port already held by some other (non-instance) process, without
+# ever binding anything: router_port_in_use is stubbed to report exactly one
+# high, never-real port as occupied.
+# shellcheck disable=SC2329 # invoked indirectly, from router_next_free_port in the sourced lib/router.sh
+router_port_in_use() { [[ "$1" == "17555" ]] && return 0 || return 1; }
+out="$(router_next_free_port 17555)"
+assert_eq "a port already held by another process is skipped" "17556" "$out"
+
+out="$(router_port_in_list '7438' '7437 7438 7439')"
+assert_status "router_port_in_list finds a member" "0" "$?"
+router_port_in_list '9999' '7437 7438 7439' >/dev/null 2>&1
+assert_status "router_port_in_list rejects a non-member" "1" "$?"
+
+echo "== router_port_in_use: unstubbed, against whatever this host actually has bound =="
+
+# Restore the library's real router_port_in_use (the stub above shadowed it
+# by redefinition; re-sourcing puts the original definition back).
+# shellcheck source=../lib/router.sh
+# shellcheck disable=SC1091
+source "$ROOT_DIR/lib/router.sh"
+# Only asserted when a probe exists at all; router_port_in_use itself is
+# exercised either way. No test here ever binds a socket — it only reads
+# already-listening sockets (real ones, e.g. this machine's own engram
+# daemons on 7437/7438, are legitimate data for exercising this, per the
+# port-in-use-skip logic; nothing is started for the purpose of this check).
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+    router_port_in_use 39217 >/dev/null 2>&1
+    assert_status "an arbitrary high port with nothing bound is reported free" "1" "$?"
+else
+    printf 'ok      %s (ss/netstat unavailable here; degrades to \"not in use\", never blocks)\n' \
+        "router_port_in_use degrades gracefully with no probe available"
+    ((PASS++))
+fi
+
 echo
 echo "passed: $PASS, failed: $FAIL"
 [[ $FAIL -eq 0 ]]

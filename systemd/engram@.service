@@ -12,7 +12,15 @@ Type=simple
 # engram.db and never touched the main database).
 Environment=ENGRAM_DATA_DIR=%h/.local/share/engram-%i
 EnvironmentFile=-%h/.config/engram-router/instances/%i.env
-ExecStart=%h/.local/bin/engram-real-path-placeholder serve
+# ENGRAM_PORT is a positional argument to `engram serve`, not an env var the
+# binary itself reads; it must come from this instance's EnvironmentFile
+# above, set by install.sh. Verified empirically (systemd 255, on this
+# machine): when ENGRAM_PORT is unset, systemd drops the unquoted $ENGRAM_PORT
+# token from the command line entirely (logging "Referenced but unset
+# environment variable"), leaving plain `engram serve`, which falls back to
+# the binary's own default (7437) — so an existing install with no
+# ENGRAM_PORT in its env file yet keeps working unchanged.
+ExecStart=%h/.local/bin/engram-real-path-placeholder serve $ENGRAM_PORT
 Restart=on-failure
 RestartSec=5
 

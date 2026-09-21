@@ -346,6 +346,7 @@ load_existing_config() {
     INSTALLED_NAMES=()
     INSTALLED_DIRS=()
     INSTALLED_NS=()
+    INSTALLED_PORTS=()
     [[ -r "$CONFIG_FILE" ]] || return 1
 
     # shellcheck source=lib/router.sh
@@ -362,6 +363,10 @@ load_existing_config() {
         INSTALLED_NAMES+=("$n")
         INSTALLED_DIRS+=("${INSTANCE_DATA_DIR[$n]:-}")
         INSTALLED_NS+=("$ns")
+        # Kept exactly as read, empty if router.json has no "port" for this
+        # instance yet (pre-existing install from before this feature):
+        # assign_all_ports fills the gap, never renumbers what is already set.
+        INSTALLED_PORTS+=("${INSTANCE_PORT[$n]:-}")
     done
     return 0
 }
@@ -375,11 +380,70 @@ show_existing_config() {
     done
 }
 
-# Adds a name/dir/namespaces triple to the set that will be written out.
+# Adds a name/dir/namespaces/port quadruple to the set that will be written
+# out. Port is the empty string for an instance that still needs one
+# assigned; assign_all_ports fills those in once every instance is known.
 push_instance() {
     INSTANCES_TO_PROVISION+=("$1")
     INSTANCE_DIRS+=("$2")
     INSTANCE_NS+=("$3")
+    INSTANCE_PORTS+=("${4:-}")
+}
+
+# ---------------------------------------------------------------------------
+# Port assignment: first free port from 7437 upward, stable across re-runs.
+#
+# "Free" means neither already assigned to another instance being written out
+# nor currently bound on the host. The probing and free-port search live in
+# lib/router.sh (router_port_in_use / router_next_free_port) so they are
+# tested once, the same way for the installer and for every other consumer.
+# ---------------------------------------------------------------------------
+
+# Fills every empty slot in INSTANCE_PORTS (parallel to
+# INSTANCES_TO_PROVISION), leaving every already-assigned port untouched.
+assign_all_ports() {
+    # shellcheck source=lib/router.sh
+    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh"
+
+    local -a taken=()
+    local i needs_assignment=0
+    for i in "${!INSTANCE_PORTS[@]}"; do
+        if [[ -n "${INSTANCE_PORTS[$i]}" ]]; then
+            taken+=("${INSTANCE_PORTS[$i]}")
+        else
+            needs_assignment=1
+        fi
+    done
+    [[ $needs_assignment -eq 1 ]] && section "Asignación de puertos"
+    for i in "${!INSTANCE_PORTS[@]}"; do
+        if [[ -z "${INSTANCE_PORTS[$i]}" ]]; then
+            local port
+            port="$(router_next_free_port "" "${taken[*]:-}")"
+            INSTANCE_PORTS[i]="$port"
+            taken+=("$port")
+            say "Puerto asignado a '${INSTANCES_TO_PROVISION[$i]}': $port"
+        fi
+    done
+}
+
+# Writes/updates ENGRAM_PORT=<n> in <instance>.env, preserving every other
+# line (in particular the user's own ENGRAM_CLOUD_AUTOSYNC choice). Runs for
+# every instance on every install, not only newly provisioned ones, so an
+# instance whose router.json gained a port this run also gets it in its env
+# file.
+write_instance_port_env() {
+    local name="$1" port="$2"
+    local env_file="$INSTANCES_ENV_DIR/$name.env"
+    mkdir -p "$INSTANCES_ENV_DIR"
+    [[ -e "$env_file" ]] || : > "$env_file"
+    if grep -q '^ENGRAM_PORT=' "$env_file" 2>/dev/null; then
+        local tmp
+        tmp="$(mktemp "$INSTANCES_ENV_DIR/.port.XXXXXX")"
+        sed "s/^ENGRAM_PORT=.*/ENGRAM_PORT=$port/" "$env_file" > "$tmp"
+        mv "$tmp" "$env_file"
+    else
+        printf 'ENGRAM_PORT=%s\n' "$port" >> "$env_file"
+    fi
 }
 
 read_new_name() {
@@ -406,17 +470,18 @@ ask_instances() {
     INSTANCES_TO_PROVISION=()
     INSTANCE_DIRS=()
     INSTANCE_NS=()
+    INSTANCE_PORTS=()
     REPROVISION=()
 
     if [[ ! -t 0 ]]; then
         if load_existing_config; then
             local i
             for i in "${!INSTALLED_NAMES[@]}"; do
-                push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}" "${INSTALLED_PORTS[$i]}"
             done
             say "Entrada no interactiva: se conserva la configuración existente."
         else
-            push_instance work "$HOME/.local/share/engram-work" ""
+            push_instance work "$HOME/.local/share/engram-work" "" ""
             say "Entrada no interactiva: se instala solo la instancia 'work' por defecto."
         fi
         return
@@ -444,14 +509,14 @@ ask_instances() {
         case "$choice" in
             1)
                 for i in "${!INSTALLED_NAMES[@]}"; do
-                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}" "${INSTALLED_PORTS[$i]}"
                 done
                 say "Configuración conservada."
                 return
                 ;;
             2)
                 for i in "${!INSTALLED_NAMES[@]}"; do
-                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                    push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}" "${INSTALLED_PORTS[$i]}"
                 done
                 local name
                 say ""
@@ -461,7 +526,7 @@ ask_instances() {
                 while name="$(read_new_name "  Nombre, o Enter si ya no quiere añadir más: ")"; do
                     [[ -z "$name" ]] && break
                     ask_one_instance "$name"
-                    push_instance "$name" "$ASKED_DIR" "$ASKED_NS"
+                    push_instance "$name" "$ASKED_DIR" "$ASKED_NS" ""
                     REPROVISION+=("$name")
                     say "Añadida instancia '$name' -> $ASKED_DIR"
                 done
@@ -478,7 +543,7 @@ ask_instances() {
                 read -r -p "  Instancia a modificar (Enter para cancelar): " target || true
                 if [[ -z "$target" ]]; then
                     for i in "${!INSTALLED_NAMES[@]}"; do
-                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}" "${INSTALLED_PORTS[$i]}"
                     done
                     say "Cancelado: no se ha modificado nada."
                     return
@@ -486,10 +551,11 @@ ask_instances() {
                 for i in "${!INSTALLED_NAMES[@]}"; do
                     if [[ "${INSTALLED_NAMES[$i]}" == "$target" ]]; then
                         ask_one_instance "$target" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
-                        push_instance "$target" "$ASKED_DIR" "$ASKED_NS"
+                        # Modifying a directory or its namespaces never renumbers its port.
+                        push_instance "$target" "$ASKED_DIR" "$ASKED_NS" "${INSTALLED_PORTS[$i]}"
                         REPROVISION+=("$target")
                     else
-                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}"
+                        push_instance "${INSTALLED_NAMES[$i]}" "${INSTALLED_DIRS[$i]}" "${INSTALLED_NS[$i]}" "${INSTALLED_PORTS[$i]}"
                     fi
                 done
                 if [[ ${#REPROVISION[@]} -eq 0 ]]; then
@@ -525,7 +591,7 @@ ask_instances() {
         if [[ -z "$name" ]]; then
             if [[ ${#INSTANCES_TO_PROVISION[@]} -eq 0 ]]; then
                 ask_one_instance work
-                push_instance work "$ASKED_DIR" "$ASKED_NS"
+                push_instance work "$ASKED_DIR" "$ASKED_NS" ""
                 REPROVISION+=(work)
             fi
             break
@@ -546,7 +612,7 @@ ask_instances() {
         fi
 
         ask_one_instance "$name"
-        push_instance "$name" "$ASKED_DIR" "$ASKED_NS"
+        push_instance "$name" "$ASKED_DIR" "$ASKED_NS" ""
         REPROVISION+=("$name")
         say "Añadida instancia '$name' -> $ASKED_DIR"
     done
@@ -713,7 +779,7 @@ write_router_config() {
     section "Reglas de enrutado"
 
     local -a rule_lines=() instance_lines=()
-    local i name dir prefix
+    local i name dir port prefix
 
     for i in "${!INSTANCES_TO_PROVISION[@]}"; do
         name="${INSTANCES_TO_PROVISION[$i]}"
@@ -725,7 +791,14 @@ write_router_config() {
     for i in "${!INSTANCES_TO_PROVISION[@]}"; do
         name="${INSTANCES_TO_PROVISION[$i]}"
         dir="${INSTANCE_DIRS[$i]}"
-        instance_lines+=("    \"$(json_escape "$name")\": { \"data_dir\": \"$(json_escape "$dir")\" }")
+        port="${INSTANCE_PORTS[$i]:-}"
+        # Kept single-line: bin/engram-migrate's sed for "data_dir" cannot
+        # cross newlines, so this object must never wrap.
+        if [[ -n "$port" ]]; then
+            instance_lines+=("    \"$(json_escape "$name")\": { \"data_dir\": \"$(json_escape "$dir")\", \"port\": $port }")
+        else
+            instance_lines+=("    \"$(json_escape "$name")\": { \"data_dir\": \"$(json_escape "$dir")\" }")
+        fi
     done
 
     # Values are emitted with %s so a "%" inside a namespace cannot be read as
@@ -815,6 +888,7 @@ main() {
     install_files
     install_systemd_unit
     ask_instances
+    assign_all_ports
 
     # Only instances the user just added or changed are provisioned: the ones
     # kept from an existing config already have their credentials, and asking
@@ -833,6 +907,13 @@ main() {
     done
 
     write_router_config
+
+    # Every instance's port lands in its env file every run, not only newly
+    # touched ones: this is what keeps an instance stable across a re-run
+    # that only just gave it a port in router.json.
+    for idx in "${!INSTANCES_TO_PROVISION[@]}"; do
+        write_instance_port_env "${INSTANCES_TO_PROVISION[$idx]}" "${INSTANCE_PORTS[$idx]}"
+    done
 
     section "Aviso final"
     say "Si ya tenía una instalación de Engram de instancia única en uso, es"
@@ -854,4 +935,8 @@ main() {
     fi
 }
 
-main "$@"
+# Guarded so tests can `source` this file to reach individual functions
+# (e.g. assign_all_ports) without running the interactive installer.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

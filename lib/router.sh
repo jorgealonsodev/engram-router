@@ -386,6 +386,61 @@ router_resolve() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Port assignment
+# ---------------------------------------------------------------------------
+# Engram's own `serve` defaults to this port when none is passed.
+ROUTER_DEFAULT_BASE_PORT=7437
+
+# router_port_in_use PORT
+# True when something is listening on PORT on this host right now. Degrades
+# gracefully when neither ss nor netstat exists: a probe that cannot run must
+# never block port assignment, so an unavailable probe reports "not in use".
+router_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        if ss -Htln 2>/dev/null | awk '{print $4}' | grep -qE "[.:]${port}\$"; then
+            return 0
+        fi
+        return 1
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[.:]${port}\$"; then
+            return 0
+        fi
+        return 1
+    fi
+    return 1
+}
+
+# router_port_in_list PORT LIST
+# True when PORT (a bare number) appears in LIST, a space-separated string.
+router_port_in_list() {
+    local port="$1" list="$2" p
+    # shellcheck disable=SC2086 # intentional word-splitting of a port list
+    for p in $list; do
+        [[ "$p" == "$port" ]] && return 0
+    done
+    return 1
+}
+
+# router_next_free_port [BASE] [TAKEN_LIST]
+# Prints the first port >= BASE (default ROUTER_DEFAULT_BASE_PORT) that is
+# neither in TAKEN_LIST (space-separated — ports already claimed elsewhere in
+# the same assignment run) nor currently bound on the host per
+# router_port_in_use.
+router_next_free_port() {
+    local base="${1:-$ROUTER_DEFAULT_BASE_PORT}" taken_list="${2:-}"
+    local port=$base
+    while :; do
+        if ! router_port_in_list "$port" "$taken_list" && ! router_port_in_use "$port"; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+}
+
 # router_is_cloud_op ARG1
 # True when the first engram sub-command argument is a cloud operation that
 # must be refused when routing is unresolved.

@@ -265,6 +265,61 @@ check_daemon_liveness() {
 }
 
 # ---------------------------------------------------------------------------
+# Check 4b: per-instance port clashes — (a) two instances configured with
+# the same port, (b) a configured port currently held by something that is
+# not that instance's own daemon. Read-only: only probes listening sockets
+# (router_port_in_use, from lib/router.sh) and systemd unit state, never
+# binds anything itself.
+# ---------------------------------------------------------------------------
+check_port_conflicts() {
+    echo "== Conflictos de puerto entre instancias =="
+    if [[ ${#INSTANCE_NAMES[@]} -eq 0 ]]; then
+        warn "no hay instancias configuradas en $ROUTER_CONFIG"
+        return
+    fi
+
+    local name port state any_reported=0
+    local -A seen_port_names=()
+    for name in "${INSTANCE_NAMES[@]}"; do
+        port="${INSTANCE_PORT[$name]:-}"
+        [[ -n "$port" ]] || continue
+        seen_port_names["$port"]+="${seen_port_names[$port]:+ }$name"
+    done
+    for port in "${!seen_port_names[@]}"; do
+        # shellcheck disable=SC2206 # space-separated instance names, intentional
+        local -a names=(${seen_port_names[$port]})
+        if [[ ${#names[@]} -gt 1 ]]; then
+            fail "puerto $port asignado a más de una instancia: ${names[*]}"
+            any_reported=1
+        fi
+    done
+
+    if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+        warn "ni ss ni netstat disponibles; no se puede comprobar si un puerto está ocupado por otro proceso"
+    else
+        local can_probe_daemon=1
+        command -v systemctl >/dev/null 2>&1 || can_probe_daemon=0
+        for name in "${INSTANCE_NAMES[@]}"; do
+            port="${INSTANCE_PORT[$name]:-}"
+            [[ -n "$port" ]] || continue
+            router_port_in_use "$port" || continue
+            if [[ $can_probe_daemon -eq 0 ]]; then
+                warn "$name: puerto $port en uso; systemctl no disponible para confirmar si es su propio daemon"
+                any_reported=1
+                continue
+            fi
+            state="$(systemctl --user is-active "engram@${name}.service" 2>/dev/null || true)"
+            if [[ "$state" != "active" ]]; then
+                fail "$name: puerto $port en uso por otro proceso (su daemon no está activo)"
+                any_reported=1
+            fi
+        done
+    fi
+
+    [[ $any_reported -eq 0 ]] && pass "sin conflictos de puerto entre las instancias configuradas"
+}
+
+# ---------------------------------------------------------------------------
 # Check 5: routing explanation for the current directory.
 # ---------------------------------------------------------------------------
 check_current_repo_routing() {
@@ -319,6 +374,8 @@ main() {
     check_instance_destinations
     echo
     check_daemon_liveness
+    echo
+    check_port_conflicts
     echo
     check_current_repo_routing
     echo
