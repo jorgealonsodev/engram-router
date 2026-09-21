@@ -12,6 +12,14 @@
 # warning) when a surviving copy exists or when the hazard is env-only with
 # already-clean files.
 #
+# It also covers the remediation commands built from that same preflight:
+# both branches print copy-pasteable commands using the real files/variable
+# names/PIDs actually detected (never a placeholder), the false claim that
+# `systemctl --user unset-environment` can never remove an inherited
+# variable is gone, every `sed -i.bak` suggestion is paired with the
+# `chmod 600` its backup needs, and the daemon-restart step appears only
+# when an "engram serve" process is actually running.
+#
 # No framework: each check prints ok/FAIL and the script exits non-zero on
 # any failure. Run with: bash tests/test_install_token_warning.sh
 #
@@ -76,12 +84,52 @@ done < <(compgen -e | grep '^ENGRAM_CLOUD_' || true)
 # Runs install.sh with HOME=FIXTURE_HOME and, if given, ENGRAM_CLOUD_TOKEN
 # set to the second argument (simulating a sourced dotfile export). Sets
 # OUT and STATUS. Never touches the real $HOME.
+#
+# `timeout` is load-bearing here too (see
+# tests/test_install_existing_root_detection.sh): every hazardous scenario
+# below is built to exit 1 at detect_hazardous_exports before any prompt,
+# but a future regression that starts reading stdin instead would otherwise
+# hang the whole suite rather than fail one check.
 run_install() {
     local fixture_home="$1" token_env="${2:-}"
     local -a env_args=("${_scrub_flags[@]}" "HOME=$fixture_home")
     [[ -n "$token_env" ]] && env_args+=("ENGRAM_CLOUD_TOKEN=$token_env")
-    OUT="$(env "${env_args[@]}" bash "$INSTALL_SH" </dev/null 2>&1)"
+    OUT="$(timeout 20 env "${env_args[@]}" bash "$INSTALL_SH" </dev/null 2>&1)"
     STATUS=$?
+}
+
+# run_detect_hazardous_exports FIXTURE_HOME TOKEN_ENV STUB_PIDS
+# Sources install.sh's function definitions (dropping its trailing
+# `main "$@"`, same technique as
+# tests/test_install_existing_root_detection.sh) in a fresh bash
+# subprocess, overrides _engram_serve_pids to return STUB_PIDS (or nothing,
+# simulating no daemon running, when STUB_PIDS is empty), then calls
+# detect_hazardous_exports() directly. This is the only way to test the
+# daemon-restart step deterministically: the real machine running this
+# suite may or may not have an actual "engram serve" process up, and the
+# step's presence must not depend on that machine's incidental state.
+run_detect_hazardous_exports() {
+    local fixture_home="$1" token_env="$2" stub_pids="$3"
+
+    local harness
+    harness="$(mktemp)"
+    cat > "$harness" <<'HARNESS'
+set -uo pipefail
+# shellcheck source=/dev/null
+source <(sed '$d' "$INSTALL_SH_PATH")
+_engram_serve_pids() {
+    [[ -n "$STUB_PIDS" ]] || return 1
+    printf '%s\n' "$STUB_PIDS"
+}
+detect_hazardous_exports
+HARNESS
+
+    local -a env_args=("${_scrub_flags[@]}" "HOME=$fixture_home" \
+        "INSTALL_SH_PATH=$INSTALL_SH" "STUB_PIDS=$stub_pids")
+    [[ -n "$token_env" ]] && env_args+=("ENGRAM_CLOUD_TOKEN=$token_env")
+    OUT="$(timeout 20 env "${env_args[@]}" bash "$harness" </dev/null 2>&1)"
+    STATUS=$?
+    rm -f "$harness"
 }
 
 # Snapshot of real-$HOME files this feature reads, taken before any
@@ -227,9 +275,10 @@ assert_no_match "(b3) never prints the stored token value" "stale-token-from-las
 rm -rf "$FIXTURE_B3"
 
 # ---------------------------------------------------------------------------
-# (c) Env-only hazard, files already clean -> unchanged branch: no
-#     credential-loss warning (there are no lines to delete in the first
-#     place), same remediation text as before this feature existed.
+# (c) Env-only hazard, files already clean -> no credential-loss warning
+#     (there are no lines to delete in the first place); the env-only
+#     branch keeps its own opening line, distinct from the files-present
+#     branch's "Cómo resolverlo antes de reintentar".
 # ---------------------------------------------------------------------------
 echo "== (c) env-only hazard, clean files -> existing branch preserved =="
 
@@ -239,12 +288,85 @@ FIXTURE_C="$(mktemp -d)"
 run_install "$FIXTURE_C" "stale-session-token"
 
 assert_eq "(c) exits 1" "1" "$STATUS"
-assert_match "(c) uses the original env-only remediation text" "Los ficheros ya están limpios" "$OUT"
+assert_match "(c) uses the env-only opening line" "Los ficheros ya están limpios" "$OUT"
 assert_no_match "(c) no credential-loss warning" "ÚNICA COPIA DEL TOKEN" "$OUT"
 assert_no_match "(c) no surviving-copy note either" "se ha encontrado otra copia del token" "$OUT"
 assert_no_match "(c) never prints the token value" "stale-session-token" "$OUT"
 
 rm -rf "$FIXTURE_C"
+
+# ---------------------------------------------------------------------------
+# (d) The false universal claim about systemd --user is gone from BOTH
+#     remediation branches, and both print the real `systemctl --user
+#     unset-environment` command built from what was actually detected —
+#     never a placeholder.
+# ---------------------------------------------------------------------------
+echo "== (d) false unset-environment claim is gone; real command is printed =="
+
+FALSE_CLAIM='no puede quitar esas'
+
+# $OUT here is still scenario (c)'s env-only output (nothing has re-run
+# install.sh since then): reused deliberately to check that branch too.
+assert_no_match "(d/env-only) false unset-environment claim removed" "$FALSE_CLAIM" "$OUT"
+
+FIXTURE_D="$(mktemp -d)"
+mkdir -p "$FIXTURE_D/.engram"
+printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": ""\n}\n' > "$FIXTURE_D/.engram/cloud.json"
+{
+    echo '# .bashrc'
+    echo 'export ENGRAM_CLOUD_TOKEN=only-copy-def'
+    echo 'export ENGRAM_CLOUD_SERVER=https://old.example'
+} > "$FIXTURE_D/.bashrc"
+
+run_install "$FIXTURE_D" "only-copy-def"
+
+assert_eq "(d) exits 1" "1" "$STATUS"
+assert_no_match "(d/files-present) false unset-environment claim removed" "$FALSE_CLAIM" "$OUT"
+assert_match "(d) prints the real sed command against the detected file" \
+    "sed -i.bak -E 's/^([[:space:]]*(export[[:space:]]+)?ENGRAM_CLOUD_)/# \\1/' $FIXTURE_D/.bashrc" "$OUT"
+assert_match "(d) chmod 600 follows the sed backup it creates" "chmod 600 $FIXTURE_D/.bashrc.bak" "$OUT"
+assert_match "(d) unset-environment names the real detected variables" \
+    "systemctl --user unset-environment ENGRAM_CLOUD_SERVER ENGRAM_CLOUD_TOKEN" "$OUT"
+assert_match "(d) explains reaching a clean shell" "Abra una shell" "$OUT"
+assert_match "(d) gives the verification command" "env | grep ENGRAM_CLOUD" "$OUT"
+assert_no_match "(d) never prints the token value" "only-copy-def" "$OUT"
+
+# Every `sed -i.bak` COMMAND (not the prose sentence that also mentions it)
+# is paired with its own `chmod 600` command right after: same count, or a
+# backup was left unprotected. Anchored on the actual command lines'
+# leading indent so the introductory prose line doesn't also count.
+sed_count="$(grep -cE '^ {7}sed -i\.bak' <<<"$OUT")"
+chmod_count="$(grep -cE '^ {7}chmod 600' <<<"$OUT")"
+assert_eq "(d) one chmod 600 per sed -i.bak backup" "$sed_count" "$chmod_count"
+
+rm -rf "$FIXTURE_D"
+
+# ---------------------------------------------------------------------------
+# (e) The daemon-restart step appears only when an "engram serve" process
+#     is actually running. Driven through run_detect_hazardous_exports(),
+#     which stubs _engram_serve_pids() directly: the real machine running
+#     this suite may or may not have one up, and that must not decide the
+#     outcome of this test.
+# ---------------------------------------------------------------------------
+echo "== (e) daemon-restart step is conditional on a real detected daemon =="
+
+FIXTURE_E="$(mktemp -d)"
+# Deliberately no dotfiles: env-only hazard, so the daemon step (if any) is
+# the only optional step in the list, easy to isolate.
+
+run_detect_hazardous_exports "$FIXTURE_E" "stale-session-token" "24601"
+assert_eq "(e/present) exits 1" "1" "$STATUS"
+assert_match "(e/present) prints the restart step with the stubbed PID" \
+    "Reinicie el demonio Engram en marcha (PID 24601)" "$OUT"
+assert_match "(e/present) explains what the restart is for" \
+    "entorno contaminado" "$OUT"
+
+run_detect_hazardous_exports "$FIXTURE_E" "stale-session-token" ""
+assert_eq "(e/absent) exits 1" "1" "$STATUS"
+assert_no_match "(e/absent) no restart step when no daemon is running" \
+    "Reinicie el demonio Engram" "$OUT"
+
+rm -rf "$FIXTURE_E"
 
 # ---------------------------------------------------------------------------
 # Real $HOME was never read or written by any of the above.

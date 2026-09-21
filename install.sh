@@ -29,6 +29,135 @@ say() { printf '%s\n' "$1"; }
 section() { printf '\n== %s ==\n' "$1"; }
 
 # ---------------------------------------------------------------------------
+# Remediation helpers for detect_hazardous_exports() below. Every command
+# they print is built from what this run actually detected — real file
+# paths, real variable names, real PIDs — never a placeholder.
+# ---------------------------------------------------------------------------
+
+# _hazard_variable_names FILE_HITS_ARRAY_NAME ENV_HITS_ARRAY_NAME
+# Prints the union of ENGRAM_CLOUD_* variable names found in the scanned
+# files and already exported into this session, deduplicated and sorted.
+# This is what feeds the `systemctl --user unset-environment` command: the
+# manager can hold a variable that came from a file even when it is not
+# exported in *this* shell, so both sources are combined.
+_hazard_variable_names() {
+    local -n _files="$1"
+    local -n _envs="$2"
+    local -A hazard_names=()
+    local var f name
+    for var in "${_envs[@]}"; do
+        hazard_names["$var"]=1
+    done
+    for f in "${_files[@]}"; do
+        [[ -r "$f" ]] || continue
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && hazard_names["$name"]=1
+        done < <(grep -oE 'ENGRAM_CLOUD_[A-Za-z0-9_]*' "$f" 2>/dev/null)
+    done
+    printf '%s\n' "${!hazard_names[@]}" | sort
+}
+
+# _engram_serve_pids
+# Prints the PID of every running "engram serve" process, one per line.
+# The pattern is word-bounded so it never matches an unrelated subcommand
+# such as "engram mcp ...". Returns 1 (prints nothing) when none is running.
+_engram_serve_pids() {
+    local out
+    if command -v pgrep >/dev/null 2>&1; then
+        out="$(pgrep -f 'engram serve([[:space:]]|$)' 2>/dev/null)" || true
+    else
+        # shellcheck disable=SC2009 # pgrep is unavailable in this branch; ps+grep is the fallback.
+        out="$(ps -eo pid=,args= 2>/dev/null \
+            | grep -E 'engram serve([[:space:]]|$)' \
+            | awk '{print $1}')" || true
+    fi
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# _print_comment_lines_step STEP_VAR FILE...
+# Step: comment the ENGRAM_CLOUD_* lines out of each detected file, with a
+# copy-pasteable `sed -i.bak` per file. sed's backup keeps the file's
+# original mode (commonly 0644, world-readable) and it still holds the
+# token, so the matching `chmod 600` is printed right after it, never
+# separately — creating a stray world-readable copy of a credential while
+# removing one is exactly the defect class this installer exists to catch.
+_print_comment_lines_step() {
+    local -n _step="$1"
+    shift
+    printf '  %d. Comente (no borre) las líneas ENGRAM_CLOUD_* en cada fichero\n' "$_step"
+    # shellcheck disable=SC2016 # literal backticks in user-facing prose, not variable expansion.
+    printf '     detectado. `sed -i.bak` deja una copia .bak con el mismo permiso\n'
+    printf '     que el original (a menudo legible por cualquiera) y esa copia\n'
+    printf '     sigue conteniendo el token, así que el chmod de abajo es parte\n'
+    printf '     del mismo paso, no un extra:\n\n'
+    local f qf qbak line
+    for f in "$@"; do
+        qf="$(printf '%q' "$f")"
+        qbak="$(printf '%q' "${f}.bak")"
+        line="       sed -i.bak -E 's/^([[:space:]]*(export[[:space:]]+)?ENGRAM_CLOUD_)/# \\1/' $qf"
+        printf '%s\n' "$line"
+        printf '       chmod 600 %s\n' "$qbak"
+    done
+    printf '\n     Si hay uno bajo ~/.config/environment.d/, es entorno de sesión de\n'
+    printf '     systemd y lo hereda todo proceso de la sesión, no solo las shells.\n\n'
+    _step=$(( _step + 1 ))
+}
+
+# _print_unset_environment_step STEP_VAR VARNAME...
+# Step: clear the systemd --user manager with the exact detected names.
+# Measured on systemd 255 (255.4-1ubuntu8.17): `unset-environment` removes
+# variables the manager is holding regardless of who set them, and a fresh
+# unit started afterwards no longer inherits them. It does not reach a
+# process that is already running, because that process froze its
+# environment at exec — that is what the next step (when applicable) and
+# the clean-shell step below are for.
+_print_unset_environment_step() {
+    local -n _step="$1"
+    shift
+    printf '  %d. Limpie el gestor de systemd --user con los nombres detectados:\n' "$_step"
+    printf '       systemctl --user unset-environment %s\n' "$*"
+    printf '     Esto limpia el gestor y toda unidad que arranque después. NO toca\n'
+    printf '     los procesos que ya están en marcha: cada uno fijó su entorno al\n'
+    printf '     arrancar (exec).\n\n'
+    _step=$(( _step + 1 ))
+}
+
+# _print_daemon_restart_step_if_needed STEP_VAR
+# Step: only printed when an "engram serve" process is actually running.
+# That process is exactly the kind the step above cannot reach — it froze
+# the polluted environment at exec — so it has to be restarted separately.
+_print_daemon_restart_step_if_needed() {
+    local -n _step="$1"
+    local pids
+    pids="$(_engram_serve_pids)" || return 0
+    printf '  %d. Reinicie el demonio Engram en marcha (PID %s): arrancó con el\n' \
+        "$_step" "$(tr '\n' ',' <<<"$pids" | sed 's/,$//; s/,/, /g')"
+    printf '     entorno contaminado y lo mantiene fijado aunque limpie el gestor de\n'
+    printf '     arriba; solo reiniciar el propio proceso lo libera. Si lo gestiona\n'
+    printf '     systemd --user, reinicie su unidad; si lo inició a mano, deténgalo\n'
+    printf '     y vuelva a lanzarlo.\n\n'
+    _step=$(( _step + 1 ))
+}
+
+# _print_clean_shell_step STEP_VAR
+# Step: the current shell, and anything already started from it, still
+# carries the exported variables no matter what the steps above did. A
+# shell started fresh from a clean parent is clean once the files are
+# commented; logging out is the guaranteed way when the desktop session
+# itself carries them.
+_print_clean_shell_step() {
+    local -n _step="$1"
+    printf '  %d. Su shell actual sigue teniendo las variables exportadas, igual\n' "$_step"
+    printf '     que cualquier proceso ya arrancado desde ella. Abra una shell\n'
+    printf '     nueva desde un padre limpio, o cierre sesión y vuelva a entrar si\n'
+    printf '     el propio entorno de la sesión de escritorio las lleva: es la vía\n'
+    printf '     garantizada.\n'
+    printf '     Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)\n\n'
+    _step=$(( _step + 1 ))
+}
+
+# ---------------------------------------------------------------------------
 # Step 1 — preflight: detect the ENGRAM_CLOUD_* hazard. Never edit these
 # files; if found, stop and explain, exactly as the feature spec requires.
 # ---------------------------------------------------------------------------
@@ -84,29 +213,27 @@ EOF
 
         printf 'Esta instalación NO va a editar automáticamente ningún dotfile.\n\n'
 
-        if [[ ${#file_hits[@]} -eq 0 ]]; then
-            cat <<'EOF'
-Los ficheros ya están limpios: solo queda una sesión antigua.
+        local -a var_names=()
+        while IFS= read -r _vn; do
+            [[ -n "$_vn" ]] && var_names+=("$_vn")
+        done < <(_hazard_variable_names file_hits env_hits)
 
-  1. Cierre sesión y vuelva a entrar.
-     El gestor de systemd --user hereda su entorno al arrancar la sesión y
-     no lo suelta: `systemctl --user unset-environment` no puede quitar esas
-     variables, solo las que él mismo definió.
-  2. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
-  3. Vuelva a ejecutar este instalador.
-EOF
+        local step=1
+        if [[ ${#file_hits[@]} -eq 0 ]]; then
+            printf 'Los ficheros ya están limpios: solo queda contaminación de sesión\n'
+            printf '(entorno vivo y, si las heredó de ahí, el gestor de systemd --user).\n\n'
+            _print_unset_environment_step step "${var_names[@]}"
+            _print_daemon_restart_step_if_needed step
+            _print_clean_shell_step step
+            printf '  %d. Vuelva a ejecutar este instalador.\n' "$step"
         else
             _warn_token_loss_if_needed
-            cat <<'EOF'
-Cómo resolverlo antes de reintentar:
-  1. Elimine o comente las líneas ENGRAM_CLOUD_* en los ficheros de arriba.
-     Si hay uno bajo ~/.config/environment.d/, es entorno de sesión de
-     systemd y lo hereda todo proceso de la sesión, no solo las shells.
-  2. Cierre sesión y vuelva a entrar. Un `source` no basta: las variables ya
-     están exportadas en los procesos vivos.
-  3. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
-  4. Vuelva a ejecutar este instalador.
-EOF
+            printf 'Cómo resolverlo antes de reintentar:\n\n'
+            _print_comment_lines_step step "${file_hits[@]}"
+            _print_unset_environment_step step "${var_names[@]}"
+            _print_daemon_restart_step_if_needed step
+            _print_clean_shell_step step
+            printf '  %d. Vuelva a ejecutar este instalador.\n' "$step"
         fi
         printf '\n'
         cat <<EOF
