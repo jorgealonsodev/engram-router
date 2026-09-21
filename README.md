@@ -76,7 +76,7 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 
 ## Files this tool touches
 
-### Creates — all new, none shared with an existing installation
+### Creates — all new, unless you point an instance at an existing root
 
 | Path | Purpose | Mode |
 |---|---|---|
@@ -108,9 +108,12 @@ tool adds an `instance` key to it rather than introducing a second marker file.
 
 ### Never touched
 
-- **`~/.engram/`** — an existing single-instance installation, its database,
-  its `cloud.json` and its enrollments are left exactly as they are. Nothing in
-  this repository references that path.
+- **`~/.engram/`** — an existing single-instance installation is left exactly
+  as it is on the default path: nothing is moved, copied or deleted, and no
+  instance points there unless you say so. The installer does offer it as a
+  data directory to reuse; typing that path makes an instance adopt the
+  existing database and enrollments in place, and still modifies nothing else.
+  Its `cloud.json` is never read by this tool — each instance carries its own.
 - **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
   `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
   `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It
@@ -153,6 +156,20 @@ the router's own parser, and running the doctor.
 Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
 are per person; this repository ships none. Credentials go into that instance's
 `cloud.json` with mode 0600, and are never echoed or logged.
+
+### The data directory question, if you already use Engram
+
+The default answer for an instance's data directory is a new, empty
+`~/.local/share/engram-<name>`. Accepting it is right for a fresh instance and
+wrong for the one that should inherit what you already have: memories in
+`~/.engram` stay where they are, and that instance starts from an empty
+database. Nothing fails and nothing warns — the repositories it routes simply
+find no history.
+
+If an existing installation should keep serving your memories, type its path
+at that prompt (`~/.engram` is the usual one). The installer detects the
+database already there and adopts it in place. Then move individual projects
+to the other instances with `engram-migrate`, rather than starting them empty.
 
 ### What it refuses
 
