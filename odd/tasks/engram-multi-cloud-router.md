@@ -82,12 +82,8 @@ Supported platforms: Linux and macOS. Windows was evaluated and declined.
 
 TDD mode: unresolved for this workspace, so no RED-before-GREEN evidence is
 claimed. Verification is by unit tests on remote parsing, shellcheck, and
-fixture-HOME smoke tests of the installer and uninstaller paths.
-
-RDD was off through 2026-09-19, so T1-T10 carry no native review and none is
-claimed for them. It has been on since 2026-09-21, decided globally; every
-work-unit commit from T11 onwards went through it, and each task records its
-lineage and outcome.
+fixture-HOME smoke tests of the installer and uninstaller paths. RDD is off,
+so no native review ran and none is claimed.
 
 ## Tasks
 
@@ -111,24 +107,6 @@ corrections, each a single already-understood file.
       Commit 3d9c156.
 
 Emerged after the original breakdown:
-
-- [x] T11 Preflight: warn before destroying the only copy of the token.
-      The preflight stopped correctly on ENGRAM_CLOUD_*, but its own
-      instructions ("delete those lines") destroyed the only copy of the
-      token without ever checking. Measured: ~/.engram/cloud.json held an
-      empty token and the live value existed only in two shell startup files.
-      Chosen scope: WARN ONLY, writing no credential to disk.
-      Commits 8276aa0, 45399bd.
-      Review lineage review-693ed30b7dbc1a9a, approved, acknowledgement
-      burned. Two CRITICAL findings, both fixed in 981d05a: the survivor
-      check tested presence rather than identity, so a different stored
-      token made it answer "puede continuar con seguridad" right before the
-      user deleted the live one — fail-open in the feature written to be
-      fail-safe; and the README asserted that ~/.engram/cloud.json is never
-      read while the same change read it.
-      Evidence: 35/35 router, 19/19 contract against real Engram 2.0.0,
-      32/32 on the new suite with a fixture HOME and a real-$HOME checksum,
-      shellcheck clean, and ./install.sh against this machine's real case.
 
 - [x] T7 Fix cloud.json key — install.sh wrote "server"; Engram reads
       "server_url". Evidence: measured both against engram v2.0.0 with a clean
@@ -180,50 +158,9 @@ Emerged while using it:
       exists but `cloud status` has no equivalent — so it now fails honestly:
       a missing label is reported as a possible format change rather than as a
       configuration problem, and `engram-doctor` warns on version drift.
-- [x] P9 The default data-directory answer started an instance on an empty
-      database while an existing install's memories stayed in ~/.engram,
-      unreferenced — nothing failed and nothing warned. The installer now
-      probes ~/.engram and $ENGRAM_DATA_DIR before asking, and when it finds
-      a root no instance has claimed it reports the root with its size and
-      counts and drops its default entirely: an empty answer is refused, so
-      nobody lands on an empty database by pressing Enter. A root already
-      claimed earlier in the run is not offered again, so a second instance
-      is never pushed toward the first one's database. Counts are read with
-      `sqlite3 -readonly` and reported as unreadable rather than estimated
-      when sqlite3 is missing or the file will not parse.
-      Commits e209dce, cd05400. Evidence: 29/29 on the new suite, 35/35
-      router, 32/32 token warning, 19/19 contract against real Engram 2.0.0,
-      shellcheck clean, and the read-only queries run against a live
-      multi-megabyte database held open by a running daemon, with its WAL
-      untouched.
-      Review lineage review-1cf22636190b081b, approved, acknowledgement
-      burned. It caught one CRITICAL from two lenses: the no-default prompt
-      spun forever on stdin EOF, because refusing an empty answer and
-      re-reading consumes nothing once the stream is finished. Proven
-      standalone at five iterations and zero bytes read, fixed in cd05400,
-      and the harness now runs under `timeout` so a non-terminating prompt
-      fails a check instead of hanging the suite.
-
 - [ ] P8 With more than one contributor, commits should stop going straight to
       `main`: a branch and a pull request per change, especially for a tool
       whose failures are silent.
-
-Advisory findings left open by the P9 review (non-blocking, recorded so they
-are not rediscovered). Highest value first:
-
-- [ ] P10 `_root_is_claimed` compares resolved paths as strings, so a root
-      reached through a symlink or a differently-spelled path is not
-      recognised as claimed and could be offered twice. Same class:
-      `_existing_engram_roots` probes only ~/.engram and $ENGRAM_DATA_DIR,
-      and `_describe_engram_root` depends on GNU `stat -c` and on bash 4
-      associative arrays, which macOS ships neither of by default —
-      the README claims macOS support.
-- [ ] P11 The answer `nueva` is a bare sentinel: a user whose directory is
-      genuinely named `nueva` cannot express it, and no other input is
-      normalised the same way.
-- [ ] P12 The new test harness reads its result from the last line of
-      output, so anything printed afterwards silently changes what is
-      asserted.
 
 Operational, per person rather than per project:
 

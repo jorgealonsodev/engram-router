@@ -29,158 +29,6 @@ say() { printf '%s\n' "$1"; }
 section() { printf '\n== %s ==\n' "$1"; }
 
 # ---------------------------------------------------------------------------
-# Remediation helpers for detect_hazardous_exports() below. Every command
-# they print is built from what this run actually detected — real file
-# paths, real variable names, real PIDs — never a placeholder.
-# ---------------------------------------------------------------------------
-
-# _hazard_variable_names FILE_HITS_ARRAY_NAME ENV_HITS_ARRAY_NAME
-# Prints the union of ENGRAM_CLOUD_* variable names found in the scanned
-# files and already exported into this session, deduplicated and sorted.
-# This is what feeds the `systemctl --user unset-environment` command: the
-# manager can hold a variable that came from a file even when it is not
-# exported in *this* shell, so both sources are combined.
-_hazard_variable_names() {
-    local -n _files="$1"
-    local -n _envs="$2"
-    local -A hazard_names=()
-    local var f name
-    for var in "${_envs[@]}"; do
-        hazard_names["$var"]=1
-    done
-    for f in "${_files[@]}"; do
-        [[ -r "$f" ]] || continue
-        while IFS= read -r name; do
-            [[ -n "$name" ]] && hazard_names["$name"]=1
-        done < <(grep -oE 'ENGRAM_CLOUD_[A-Za-z0-9_]*' "$f" 2>/dev/null)
-    done
-    printf '%s\n' "${!hazard_names[@]}" | sort
-}
-
-# _engram_serve_pids
-# Prints the PID of every running "engram serve" process, one per line.
-# The pattern is word-bounded so it never matches an unrelated subcommand
-# such as "engram mcp ...". Returns 1 (prints nothing) when none is running.
-_engram_serve_pids() {
-    local out
-    if command -v pgrep >/dev/null 2>&1; then
-        out="$(pgrep -f 'engram serve([[:space:]]|$)' 2>/dev/null)" || true
-    else
-        # shellcheck disable=SC2009 # pgrep is unavailable in this branch; ps+grep is the fallback.
-        out="$(ps -eo pid=,args= 2>/dev/null \
-            | grep -E 'engram serve([[:space:]]|$)' \
-            | awk '{print $1}')" || true
-    fi
-    [[ -n "$out" ]] || return 1
-    printf '%s\n' "$out"
-}
-
-# _print_comment_lines_step STEP_VAR FILE...
-# Step: comment the ENGRAM_CLOUD_* lines out of each detected file, with a
-# copy-pasteable `sed -i.bak` per file. sed's backup keeps the file's
-# original mode (commonly 0644, world-readable) and it still holds the
-# token, so the matching `chmod 600` is printed right after it, never
-# separately — creating a stray world-readable copy of a credential while
-# removing one is exactly the defect class this installer exists to catch.
-_print_comment_lines_step() {
-    local -n _step="$1"
-    shift
-    printf '  %d. Comente (no borre) las líneas ENGRAM_CLOUD_* en cada fichero\n' "$_step"
-    # shellcheck disable=SC2016 # literal backticks in user-facing prose, not variable expansion.
-    printf '     detectado. `sed -i.bak` deja una copia .bak con el mismo permiso\n'
-    printf '     que el original (a menudo legible por cualquiera) y esa copia\n'
-    printf '     sigue conteniendo el token, así que el chmod de abajo es parte\n'
-    printf '     del mismo paso, no un extra:\n\n'
-    local f target qf qbak line
-    for f in "$@"; do
-        # A symlinked dotfile — a stow/chezmoi/yadm farm, which is exactly
-        # where a shared .bashrc with an exported credential tends to live —
-        # must not be handed a bare `sed -i`. In-place sed does not follow
-        # the link: it renames the LINK to the .bak name and writes a new
-        # regular file in its place, so the managed source keeps the
-        # uncommented export while this machine looks fixed. The `chmod`
-        # then follows that moved link and changes the source's mode
-        # instead of the backup's. Measured: all four effects reproduce.
-        target="$f"
-        if [[ -L "$f" ]]; then
-            target="$(_resolve_abs_path "$f")"
-            if [[ "$target" == "$f" || ! -e "$target" ]]; then
-                # No usable resolution (a BSD readlink without -f, or a
-                # broken link). Printing a command that would quietly move
-                # the link aside is worse than printing none.
-                printf '       # %s es un enlace simbólico y no se ha podido\n' "$f"
-                printf '       # resolver su destino: edítelo a mano en el fichero real,\n'
-                printf '       # no con sed -i sobre el enlace.\n'
-                continue
-            fi
-            printf '       # %s es un enlace simbólico: se edita su destino real\n' "$f"
-            printf '       # para no reemplazar el enlace por un fichero suelto.\n'
-        fi
-        qf="$(printf '%q' "$target")"
-        qbak="$(printf '%q' "${target}.bak")"
-        line="       sed -i.bak -E 's/^([[:space:]]*(export[[:space:]]+)?ENGRAM_CLOUD_)/# \\1/' $qf"
-        printf '%s\n' "$line"
-        printf '       chmod 600 %s\n' "$qbak"
-    done
-    printf '\n     Si hay uno bajo ~/.config/environment.d/, es entorno de sesión de\n'
-    printf '     systemd y lo hereda todo proceso de la sesión, no solo las shells.\n\n'
-    _step=$(( _step + 1 ))
-}
-
-# _print_unset_environment_step STEP_VAR VARNAME...
-# Step: clear the systemd --user manager with the exact detected names.
-# Measured on systemd 255 (255.4-1ubuntu8.17): `unset-environment` removes
-# variables the manager is holding regardless of who set them, and a fresh
-# unit started afterwards no longer inherits them. It does not reach a
-# process that is already running, because that process froze its
-# environment at exec — that is what the next step (when applicable) and
-# the clean-shell step below are for.
-_print_unset_environment_step() {
-    local -n _step="$1"
-    shift
-    printf '  %d. Limpie el gestor de systemd --user con los nombres detectados:\n' "$_step"
-    printf '       systemctl --user unset-environment %s\n' "$*"
-    printf '     Esto limpia el gestor y toda unidad que arranque después. NO toca\n'
-    printf '     los procesos que ya están en marcha: cada uno fijó su entorno al\n'
-    printf '     arrancar (exec).\n\n'
-    _step=$(( _step + 1 ))
-}
-
-# _print_daemon_restart_step_if_needed STEP_VAR
-# Step: only printed when an "engram serve" process is actually running.
-# That process is exactly the kind the step above cannot reach — it froze
-# the polluted environment at exec — so it has to be restarted separately.
-_print_daemon_restart_step_if_needed() {
-    local -n _step="$1"
-    local pids
-    pids="$(_engram_serve_pids)" || return 0
-    printf '  %d. Reinicie el demonio Engram en marcha (PID %s): arrancó con el\n' \
-        "$_step" "$(tr '\n' ',' <<<"$pids" | sed 's/,$//; s/,/, /g')"
-    printf '     entorno contaminado y lo mantiene fijado aunque limpie el gestor de\n'
-    printf '     arriba; solo reiniciar el propio proceso lo libera. Si lo gestiona\n'
-    printf '     systemd --user, reinicie su unidad; si lo inició a mano, deténgalo\n'
-    printf '     y vuelva a lanzarlo.\n\n'
-    _step=$(( _step + 1 ))
-}
-
-# _print_clean_shell_step STEP_VAR
-# Step: the current shell, and anything already started from it, still
-# carries the exported variables no matter what the steps above did. A
-# shell started fresh from a clean parent is clean once the files are
-# commented; logging out is the guaranteed way when the desktop session
-# itself carries them.
-_print_clean_shell_step() {
-    local -n _step="$1"
-    printf '  %d. Su shell actual sigue teniendo las variables exportadas, igual\n' "$_step"
-    printf '     que cualquier proceso ya arrancado desde ella. Abra una shell\n'
-    printf '     nueva desde un padre limpio, o cierre sesión y vuelva a entrar si\n'
-    printf '     el propio entorno de la sesión de escritorio las lleva: es la vía\n'
-    printf '     garantizada.\n'
-    printf '     Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)\n\n'
-    _step=$(( _step + 1 ))
-}
-
-# ---------------------------------------------------------------------------
 # Step 1 — preflight: detect the ENGRAM_CLOUD_* hazard. Never edit these
 # files; if found, stop and explain, exactly as the feature spec requires.
 # ---------------------------------------------------------------------------
@@ -236,27 +84,28 @@ EOF
 
         printf 'Esta instalación NO va a editar automáticamente ningún dotfile.\n\n'
 
-        local -a var_names=()
-        while IFS= read -r _vn; do
-            [[ -n "$_vn" ]] && var_names+=("$_vn")
-        done < <(_hazard_variable_names file_hits env_hits)
-
-        local step=1
         if [[ ${#file_hits[@]} -eq 0 ]]; then
-            printf 'Los ficheros ya están limpios: solo queda contaminación de sesión\n'
-            printf '(entorno vivo y, si las heredó de ahí, el gestor de systemd --user).\n\n'
-            _print_unset_environment_step step "${var_names[@]}"
-            _print_daemon_restart_step_if_needed step
-            _print_clean_shell_step step
-            printf '  %d. Vuelva a ejecutar este instalador.\n' "$step"
+            cat <<'EOF'
+Los ficheros ya están limpios: solo queda una sesión antigua.
+
+  1. Cierre sesión y vuelva a entrar.
+     El gestor de systemd --user hereda su entorno al arrancar la sesión y
+     no lo suelta: `systemctl --user unset-environment` no puede quitar esas
+     variables, solo las que él mismo definió.
+  2. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
+  3. Vuelva a ejecutar este instalador.
+EOF
         else
-            _warn_token_loss_if_needed
-            printf 'Cómo resolverlo antes de reintentar:\n\n'
-            _print_comment_lines_step step "${file_hits[@]}"
-            _print_unset_environment_step step "${var_names[@]}"
-            _print_daemon_restart_step_if_needed step
-            _print_clean_shell_step step
-            printf '  %d. Vuelva a ejecutar este instalador.\n' "$step"
+            cat <<'EOF'
+Cómo resolverlo antes de reintentar:
+  1. Elimine o comente las líneas ENGRAM_CLOUD_* en los ficheros de arriba.
+     Si hay uno bajo ~/.config/environment.d/, es entorno de sesión de
+     systemd y lo hereda todo proceso de la sesión, no solo las shells.
+  2. Cierre sesión y vuelva a entrar. Un `source` no basta: las variables ya
+     están exportadas en los procesos vivos.
+  3. Compruebe con: env | grep ENGRAM_CLOUD   (no debe salir nada)
+  4. Vuelva a ejecutar este instalador.
+EOF
         fi
         printf '\n'
         cat <<EOF
@@ -265,176 +114,6 @@ EOF
         exit 1
     fi
     say "OK: no se han encontrado exportaciones ENGRAM_CLOUD_* peligrosas."
-}
-
-# ---------------------------------------------------------------------------
-# Step 1a — token-survival check: only reached from the "files present"
-# remediation branch above, whose step 1 tells the user to delete the
-# ENGRAM_CLOUD_* lines. If ENGRAM_CLOUD_TOKEN is live in this session and no
-# other non-empty copy exists (~/.engram/cloud.json or an already-provisioned
-# instance's cloud.json), following that instruction destroys the credential
-# irrecoverably. This check never writes anything and never prints the token
-# value itself — only locations.
-# ---------------------------------------------------------------------------
-
-# _cloud_json_token CLOUD_JSON_PATH
-# Prints the "token" field of a flat cloud.json (same shape read by
-# bin/engram-router::_instance_cloud_server), or fails if the file is
-# unreadable, malformed, or the field is empty.
-_cloud_json_token() {
-    local cloud_json="$1" content
-    [[ -r "$cloud_json" ]] || return 1
-    content="$(cat "$cloud_json" 2>/dev/null)" || return 1
-    local -A obj=()
-    _router_json_parse_flat_object "$content" 0 obj 2>/dev/null || return 1
-    local token="${obj[token]:-}"
-    [[ -n "$token" ]] || return 1
-    printf '%s\n' "$token"
-}
-
-# _classify_token_copy CLOUD_JSON_PATH [SUFFIX]
-# Classifies one cloud.json against the token that is live in this session.
-# Presence of *a* token is not enough: a copy only survives the remediation
-# if it holds the SAME value. A different non-empty token — rotated, revoked,
-# or belonging to another server — leaves the live credential exactly as
-# unrecoverable, so it is reported as OTHER and never counted as a survivor.
-# Reassuring the user on presence alone would turn this warning fail-open.
-_classify_token_copy() {
-    local cloud_json="$1" suffix="${2:-}" stored
-    if [[ ! -e "$cloud_json" ]]; then
-        printf 'MISSING:%s%s\n' "$cloud_json" "$suffix"
-        return 0
-    fi
-    if ! stored="$(_cloud_json_token "$cloud_json" 2>/dev/null)"; then
-        printf 'EMPTY:%s%s\n' "$cloud_json" "$suffix"
-        return 0
-    fi
-    if [[ "$stored" == "${ENGRAM_CLOUD_TOKEN:-}" ]]; then
-        printf 'SURVIVING:%s%s\n' "$cloud_json" "$suffix"
-    else
-        printf 'OTHER:%s%s\n' "$cloud_json" "$suffix"
-    fi
-}
-
-# _load_router_lib_best_effort
-# Sources lib/router.sh (installed copy first, repo copy as fallback — same
-# pattern as load_existing_config) so _router_json_parse_flat_object and
-# router_expand_path are available. Never fatal: callers degrade gracefully
-# when neither copy can be sourced.
-_load_router_lib_best_effort() {
-    # shellcheck source=lib/router.sh
-    source "$LIB_DIR/router.sh" 2>/dev/null && return 0
-    # shellcheck source=lib/router.sh
-    source "$SCRIPT_DIR/lib/router.sh" 2>/dev/null && return 0
-    return 1
-}
-
-# _token_definition_locations
-# Prints "file:line" for each line that defines ENGRAM_CLOUD_TOKEN
-# specifically, across the same files the hazard scan above already reads.
-_token_definition_locations() {
-    local f
-    for f in "${DOTFILES_TO_SCAN[@]}"; do
-        [[ -r "$f" ]] || continue
-        # "|| true": grep exits 1 on no match, which under pipefail would
-        # otherwise abort this loop early (set -e) and skip the remaining
-        # files instead of just reporting an empty result for this one.
-        grep -nE '^\s*(export\s+)?ENGRAM_CLOUD_TOKEN=' "$f" 2>/dev/null \
-            | while IFS=: read -r lineno _; do printf '%s:%s\n' "$f" "$lineno"; done || true
-    done
-    for f in "$HOME"/.config/environment.d/*.conf; do
-        [[ -e "$f" ]] || continue
-        grep -nE '^\s*ENGRAM_CLOUD_TOKEN=' "$f" 2>/dev/null \
-            | while IFS=: read -r lineno _; do printf '%s:%s\n' "$f" "$lineno"; done || true
-    done
-}
-
-# _survey_token_copies
-# Checks $HOME/.engram/cloud.json and every already-provisioned instance's
-# cloud.json (per router.json, if any) for a non-empty token. Prints one
-# line per location actually checked, prefixed SURVIVING:, EMPTY:, or
-# MISSING:, so the caller can report exactly what it found — never a guess.
-_survey_token_copies() {
-    # Loaded once, up front: _cloud_json_token below needs
-    # _router_json_parse_flat_object regardless of which path it checks, and
-    # this runs before install_files ever puts a copy of the library in
-    # place, so the repo copy is very often the only one available yet.
-    _load_router_lib_best_effort || true
-
-    _classify_token_copy "$HOME/.engram/cloud.json"
-
-    [[ -r "$CONFIG_FILE" ]] || return 0
-    _load_router_lib_best_effort || return 0
-    declare -f router_load_config >/dev/null 2>&1 || return 0
-    router_load_config "$CONFIG_FILE" 2>/dev/null || return 0
-    [[ ${#INSTANCE_NAMES[@]} -gt 0 ]] || return 0
-
-    local name data_dir icj
-    for name in "${INSTANCE_NAMES[@]}"; do
-        data_dir="$(router_expand_path "${INSTANCE_DATA_DIR[$name]}")"
-        icj="$data_dir/cloud.json"
-        _classify_token_copy "$icj" " (instancia $name)"
-    done
-}
-
-# _warn_token_loss_if_needed
-# Only relevant when ENGRAM_CLOUD_TOKEN is live in the environment right now
-# (see header comment). If no surviving non-empty copy exists anywhere,
-# prints a prominent warning naming the exact file:line locations and what
-# was checked, BEFORE the numbered remediation steps. If a surviving copy
-# exists, says so briefly instead. Never prints the token value.
-_warn_token_loss_if_needed() {
-    compgen -e | grep -qx 'ENGRAM_CLOUD_TOKEN' || return 0
-
-    local -a token_locs=()
-    local loc
-    while IFS= read -r loc; do
-        [[ -n "$loc" ]] && token_locs+=("$loc")
-    done < <(_token_definition_locations)
-
-    local -a surviving=() checked=()
-    while IFS= read -r loc; do
-        [[ -n "$loc" ]] || continue
-        case "$loc" in
-            SURVIVING:*) surviving+=("${loc#SURVIVING:}") ;;
-            OTHER:*)     checked+=("${loc#OTHER:} (guarda otro token, no el activo)") ;;
-            EMPTY:*)     checked+=("${loc#EMPTY:} (sin token)") ;;
-            MISSING:*)   checked+=("${loc#MISSING:} (no existe)") ;;
-        esac
-    done < <(_survey_token_copies)
-
-    if [[ ${#surviving[@]} -gt 0 ]]; then
-        printf 'AVISO: el token activo está guardado también en:\n'
-        printf '  - %s\n' "${surviving[@]}"
-        printf 'Puede continuar con seguridad: ese fichero guarda exactamente el mismo\nvalor, así que sobrevive aunque se borren las líneas de arriba.\n\n'
-        return 0
-    fi
-
-    # The heading agrees in number with what is actually listed below it: a
-    # message that says "esa línea" while printing two is the kind of small
-    # inaccuracy that makes a user doubt the rest of the warning.
-    case ${#token_locs[@]} in
-        0) printf '\n*** AVISO: NO SE CONOCE OTRA COPIA DEL TOKEN ***\n\n' ;;
-        1) printf '\n*** AVISO: ESA LÍNEA ES LA ÚNICA COPIA DEL TOKEN ***\n\n' ;;
-        *) printf '\n*** AVISO: ESAS LÍNEAS SON LA ÚNICA COPIA DEL TOKEN ***\n\n' ;;
-    esac
-    if [[ ${#token_locs[@]} -gt 0 ]]; then
-        printf 'ENGRAM_CLOUD_TOKEN está definido únicamente en:\n'
-        printf '  - %s\n' "${token_locs[@]}"
-    else
-        printf 'ENGRAM_CLOUD_TOKEN está activo en esta sesión, pero no se ha podido\n'
-        printf 'localizar la línea exacta que lo define.\n'
-    fi
-    printf '\n'
-    if [[ ${#checked[@]} -gt 0 ]]; then
-        printf 'Comprobado y sin token utilizable:\n'
-        printf '  - %s\n' "${checked[@]}"
-        printf '\n'
-    fi
-    printf 'GUARDE el valor del token (por ejemplo, en un gestor de contraseñas)\n'
-    printf 'ANTES del paso 1 de abajo. Si borra esas líneas sin haberlo guardado,\n'
-    printf 'tendrá que emitir un token nuevo en el servidor: no hay forma de\n'
-    printf 'recuperar el valor actual.\n\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -616,161 +295,6 @@ ask_namespaces_for() {
     printf '%s' "${collected[*]-}"
 }
 
-# ---------------------------------------------------------------------------
-# Existing-root detection (P9) — probed BEFORE ask_one_instance offers a
-# default, so a brand-new instance never silently starts on an empty
-# database while an existing installation's memories sit unreferenced in
-# ~/.engram. See odd/tasks/engram-multi-cloud-router.md for the incident
-# this guards against.
-# ---------------------------------------------------------------------------
-
-# _resolve_abs_path VALUE
-# Expands ~/$HOME the same way router_expand_path does, then canonicalizes
-# with readlink -f. Works even when the path does not exist yet (GNU
-# readlink -f does not require the target to exist), which matters for a
-# configured-but-not-yet-created instance directory. Falls back to the
-# expanded-but-unresolved path if router.sh cannot be loaded or readlink
-# fails, so comparisons degrade gracefully instead of erroring out.
-_resolve_abs_path() {
-    declare -f router_expand_path >/dev/null 2>&1 || _load_router_lib_best_effort || true
-    local p="$1"
-    if declare -f router_expand_path >/dev/null 2>&1; then
-        p="$(router_expand_path "$p")"
-    else
-        p="${p/#\~/$HOME}"
-    fi
-    readlink -f -- "$p" 2>/dev/null || printf '%s\n' "$p"
-}
-
-# _shorten_home ABS_PATH
-# Cosmetic inverse of the $HOME expansion above, only for display.
-_shorten_home() {
-    local p="$1"
-    if [[ "$p" == "$HOME" ]]; then
-        printf '~'
-    elif [[ "$p" == "$HOME"/* ]]; then
-        # Literal display text, not a path meant to expand — shellcheck
-        # cannot tell the difference from a quoting mistake.
-        # shellcheck disable=SC2088
-        printf '~/%s' "${p#"$HOME"/}"
-    else
-        printf '%s' "$p"
-    fi
-}
-
-# _existing_engram_roots
-# Prints one resolved absolute path per line for every candidate root that
-# contains engram.db: $HOME/.engram first, then $ENGRAM_DATA_DIR if set and
-# different, de-duplicated by resolved path.
-_existing_engram_roots() {
-    local -a candidates=("$HOME/.engram")
-    [[ -n "${ENGRAM_DATA_DIR:-}" ]] && candidates+=("$ENGRAM_DATA_DIR")
-
-    local -A seen_roots=()
-    local c abs
-    for c in "${candidates[@]}"; do
-        abs="$(_resolve_abs_path "$c")"
-        [[ -n "${seen_roots[$abs]:-}" ]] && continue
-        seen_roots[$abs]=1
-        [[ -e "$abs/engram.db" ]] && printf '%s\n' "$abs"
-    done
-}
-
-# _root_is_claimed ROOT
-# A root is claimed when it resolves to the same path as a directory already
-# pushed this run (INSTANCE_DIRS, a global array populated by push_instance —
-# see ask_instances). By the time ask_one_instance is asked for a brand-new
-# instance, every instance kept or configured earlier in this same run —
-# whether loaded from router.json or just typed — has already been pushed,
-# so this one check covers both "already in router.json" and "chosen earlier
-# in this run" without consulting router.json a second time.
-_root_is_claimed() {
-    local root="$1" d
-    for d in ${INSTANCE_DIRS[@]+"${INSTANCE_DIRS[@]}"}; do
-        [[ -n "$d" ]] || continue
-        [[ "$(_resolve_abs_path "$d")" == "$root" ]] && return 0
-    done
-    return 1
-}
-
-# _human_size_mb BYTES
-# Formats a byte count as "N.N MB" (or "N.NN GB" past 1 GiB), matching the
-# style used elsewhere in this installer's output.
-_human_size_mb() {
-    # LC_ALL=C: the locale's decimal separator must not leak into a
-    # figure that later gets compared/matched as "N.N MB".
-    LC_ALL=C awk -v b="$1" 'BEGIN {
-        mb = b / 1048576
-        if (mb >= 1024) { printf "%.2f GB", mb / 1024 } else { printf "%.1f MB", mb }
-    }'
-}
-
-# _describe_engram_root ROOT
-# Prints "<size>, <N observaciones>, <M proyectos>" for the engram.db under
-# ROOT. Reads the database the same way bin/engram-migrate does — same
-# table (observations), same "not deleted" filter (deleted_at IS NULL) — but
-# opened with sqlite3's own -readonly flag: a live `engram serve` may hold
-# this file in WAL mode, and this call must never take a write lock or
-# create/modify -wal/-shm state. If sqlite3 is missing or the query fails,
-# reports that plainly instead of fabricating a number — the exact failure
-# mode this installer exists to avoid.
-_describe_engram_root() {
-    local root="$1"
-    local db="$root/engram.db"
-    local size_bytes size_str obs proj obs_str proj_str
-
-    if size_bytes="$(stat -c %s "$db" 2>/dev/null)" && [[ -n "$size_bytes" ]]; then
-        size_str="$(_human_size_mb "$size_bytes")"
-    else
-        size_str="tamaño desconocido"
-    fi
-
-    if command -v sqlite3 >/dev/null 2>&1; then
-        obs="$(sqlite3 -readonly "$db" \
-            "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL;" 2>/dev/null || true)"
-        proj="$(sqlite3 -readonly "$db" \
-            "SELECT COUNT(DISTINCT project) FROM observations WHERE deleted_at IS NULL;" 2>/dev/null || true)"
-        if [[ "$obs" =~ ^[0-9]+$ ]]; then
-            obs_str="$obs observaciones"
-        else
-            obs_str="no se pudo leer el número de observaciones"
-        fi
-        if [[ "$proj" =~ ^[0-9]+$ ]]; then
-            proj_str="$proj proyectos"
-        else
-            proj_str="no se pudo leer el número de proyectos"
-        fi
-    else
-        obs_str="no se pudo leer el número de observaciones (sqlite3 no disponible)"
-        proj_str="no se pudo leer el número de proyectos (sqlite3 no disponible)"
-    fi
-
-    printf '%s, %s, %s' "$size_str" "$obs_str" "$proj_str"
-}
-
-# _validate_instance_dir DIR
-# The path checks ask_one_instance has always run, factored out so both the
-# normal-default prompt and the no-default detection prompt share exactly
-# one implementation.
-_validate_instance_dir() {
-    local dir="$1"
-    # Caught early because mkdir would otherwise abort the whole install
-    # several steps later, after credentials had already been typed.
-    if [[ -e "$dir" && ! -d "$dir" ]]; then
-        say "  '$dir' existe y no es una carpeta. Elija otra ruta."
-        return 1
-    fi
-    if [[ ! -e "$dir" ]]; then
-        local parent="$dir"
-        while [[ ! -e "$parent" && "$parent" != "/" ]]; do parent="$(dirname "$parent")"; done
-        if [[ ! -w "$parent" ]]; then
-            say "  No hay permiso de escritura en '$parent'. Elija otra ruta."
-            return 1
-        fi
-    fi
-    return 0
-}
-
 # Asks for one instance's directory, credentials and namespaces. Used both for
 # a brand-new instance and for modifying one that already exists.
 ask_one_instance() {
@@ -778,81 +302,32 @@ ask_one_instance() {
 
     local default_dir="${cur_dir:-$HOME/.local/share/engram-$name}" dir=""
     say "  Carpeta donde '$name' guardará su base de datos."
-
-    # Detection only applies to a brand-new instance (cur_dir empty). When
-    # modifying one that already exists, its current directory stays the
-    # default — forcing an explicit answer there would be a needless trap
-    # for someone just changing namespaces.
-    local -a unclaimed_roots=()
-    if [[ -z "$cur_dir" ]]; then
-        local root
-        while IFS= read -r root; do
-            [[ -n "$root" ]] || continue
-            _root_is_claimed "$root" || unclaimed_roots+=("$root")
-        done < <(_existing_engram_roots)
-    fi
-
-    if [[ ${#unclaimed_roots[@]} -gt 0 ]]; then
-        say "  DETECTADA una instalación de Engram existente:"
-        for root in "${unclaimed_roots[@]}"; do
-            say "    $(_shorten_home "$root")  ->  $(_describe_engram_root "$root")"
-        done
-        say ""
-        say "  Ninguna instancia la está usando todavía. Si empieza con una"
-        say "  carpeta nueva, esas memorias siguen ahí pero NINGUNA instancia"
-        say "  las verá: los repos que enrute encontrarán una base vacía."
-        say ""
-        if [[ ${#unclaimed_roots[@]} -eq 1 ]]; then
-            say "  Escriba $(_shorten_home "${unclaimed_roots[0]}") para adoptarla, o 'nueva' para empezar vacío."
-        else
-            say "  Escriba una de las rutas de arriba para adoptarla, o 'nueva' para empezar vacío."
-        fi
-        while :; do
+    say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
+    say "  instalación de Engram que ya exista para reutilizar sus memorias."
+    say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
+    while :; do
+        dir=""
+        read -r -p "  Carpeta [Enter = $default_dir]: " dir || dir=""
+        dir="${dir:-$default_dir}"
+        dir="${dir/#\~/$HOME}"
+        # Caught early because mkdir would otherwise abort the whole install
+        # several steps later, after credentials had already been typed.
+        if [[ -e "$dir" && ! -d "$dir" ]]; then
+            say "  '$dir' existe y no es una carpeta. Elija otra ruta."
             dir=""
-            # read's exit status is the only way to tell "the user pressed
-            # Enter" from "there is no more input". They must not be treated
-            # alike here: this branch has no default to fall back on, so
-            # re-asking an exhausted stream would print the refusal and read
-            # EOF again forever, consuming nothing. The default-offering
-            # branch below is immune only because it collapses an EOF read
-            # into its default and leaves the loop on the first pass.
-            local read_ok=1
-            read -r -p "  Carpeta (sin valor por defecto): " dir || read_ok=0
-            # A failed read still yields a final line that had no trailing
-            # newline, so only a failure with nothing in hand is EOF.
-            if [[ $read_ok -eq 0 && -z "$dir" ]]; then
-                say ""
-                say "  Entrada agotada sin respuesta (EOF)."
-                say "  Esta pregunta no tiene valor por defecto a propósito: elegir por"
-                say "  usted arriesgaría arrancar '$name' con una base vacía, o adoptar"
-                say "  memorias que quizá no le corresponden. Instalación detenida."
-                exit 1
-            fi
-            if [[ -z "$dir" ]]; then
-                say "  No se acepta un valor vacío aquí: escriba una ruta o 'nueva'."
+            continue
+        fi
+        if [[ ! -e "$dir" ]]; then
+            local parent="$dir"
+            while [[ ! -e "$parent" && "$parent" != "/" ]]; do parent="$(dirname "$parent")"; done
+            if [[ ! -w "$parent" ]]; then
+                say "  No hay permiso de escritura en '$parent'. Elija otra ruta."
+                dir=""
                 continue
             fi
-            if [[ "$dir" == "nueva" ]]; then
-                dir="$default_dir"
-            else
-                dir="${dir/#\~/$HOME}"
-            fi
-            _validate_instance_dir "$dir" || { dir=""; continue; }
-            break
-        done
-    else
-        say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
-        say "  instalación de Engram que ya exista para reutilizar sus memorias."
-        say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
-        while :; do
-            dir=""
-            read -r -p "  Carpeta [Enter = $default_dir]: " dir || dir=""
-            dir="${dir:-$default_dir}"
-            dir="${dir/#\~/$HOME}"
-            _validate_instance_dir "$dir" || { dir=""; continue; }
-            break
-        done
-    fi
+        fi
+        break
+    done
 
     # Reusing an existing installation root keeps its memories, its enrollments
     # and its sync cursors; a fresh directory silently starts from an empty

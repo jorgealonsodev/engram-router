@@ -76,7 +76,7 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 
 ## Files this tool touches
 
-### Creates — all new, unless you point an instance at an existing root
+### Creates — all new, none shared with an existing installation
 
 | Path | Purpose | Mode |
 |---|---|---|
@@ -108,15 +108,9 @@ tool adds an `instance` key to it rather than introducing a second marker file.
 
 ### Never touched
 
-- **`~/.engram/`** — an existing single-instance installation is left exactly
-  as it is on the default path: nothing is moved, copied or deleted, and no
-  instance points there unless you say so. The installer does offer it as a
-  data directory to reuse; typing that path makes an instance adopt the
-  existing database and enrollments in place, and still modifies nothing else.
-  Its `cloud.json` is read, never written: the installer's preflight looks
-  there for a surviving copy of a token it is about to tell you to delete.
-  Credentials are still per instance — nothing in `~/.engram/cloud.json` is
-  used to configure one.
+- **`~/.engram/`** — an existing single-instance installation, its database,
+  its `cloud.json` and its enrollments are left exactly as they are. Nothing in
+  this repository references that path.
 - **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
   `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
   `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It
@@ -159,34 +153,6 @@ the router's own parser, and running the doctor.
 Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
 are per person; this repository ships none. Credentials go into that instance's
 `cloud.json` with mode 0600, and are never echoed or logged.
-
-### The data directory question, if you already use Engram
-
-Before asking for a brand-new instance's data directory, the installer
-probes for an existing Engram installation: `~/.engram` (Engram's own
-default root) and, if set to somewhere else, `$ENGRAM_DATA_DIR`. A root
-counts as existing when it holds an `engram.db`.
-
-If it finds one that is not already claimed by an instance you configured
-earlier — in `router.json` from a previous run, or earlier in this same
-run — the prompt reports it, with size and (when `sqlite3` is available) how
-many observations and projects it holds, and drops its usual default
-entirely: an empty answer is refused and re-asked, so you cannot land on a
-new empty database by pressing Enter without noticing. Type the reported
-path to adopt it, or the word `nueva` to start with a fresh
-`~/.local/share/engram-<name>` instead.
-
-If `sqlite3` is not available, or the database cannot be read, the installer
-still reports the detection and the file's size, and says plainly which
-counts it could not read — it never guesses a number.
-
-Once an instance already exists (you are modifying it, not creating it) this
-detection does not apply: its current directory stays the default, as
-before. The same is true for a root an earlier instance in the same run
-already claimed — it is not offered again to a second instance.
-
-Then move individual projects to the other instances with `engram-migrate`,
-rather than starting them empty.
 
 ### What it refuses
 
