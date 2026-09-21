@@ -120,13 +120,18 @@ ask_one_instance "$INSTANCE_NAME"
 printf '___ASKED_DIR___%s\n' "$ASKED_DIR"
 HARNESS
 
-    raw="$(env "${_scrub_flags[@]}" \
+    # `timeout` is load-bearing, not caution: a prompt that re-asks an
+    # exhausted stream consumes no input and never returns, so without it a
+    # non-terminating regression hangs the whole suite instead of failing
+    # one check. STATUS 124 is what that looks like.
+    raw="$(timeout 20 env "${_scrub_flags[@]}" \
         "HOME=$fixture_home" \
         "PATH=$path_override" \
         INSTALL_SH_PATH="$INSTALL_SH" \
         INSTANCE_DIRS_CSV="$instance_dirs_csv" \
         INSTANCE_NAME="$name" \
         bash "$harness" <<<"$input" 2>&1)"
+    STATUS=$?
     rm -f "$harness"
 
     ASKED_DIR="$(sed -n 's/^___ASKED_DIR___//p' <<<"$raw" | tail -1)"
@@ -287,6 +292,38 @@ assert_match "(f2) states the project count honestly" \
     "no se pudo leer el número de proyectos" "$OUT"
 
 rm -rf "$FIXTURE_F2"
+
+# ---------------------------------------------------------------------------
+# (g) Exhausted input terminates instead of spinning. The no-default prompt
+#     cannot fall back the way the default-offering branch does, so an EOF
+#     read has to end the run: re-asking a stream that is already finished
+#     consumes nothing and prints the refusal forever. Both a stream that
+#     never held an answer and one exhausted after a rejected value are
+#     covered, because the validation failure path re-enters the same loop.
+# ---------------------------------------------------------------------------
+echo "== (g) exhausted input terminates, never spins =="
+
+FIXTURE_G="$(mktemp -d)"
+mkdir -p "$FIXTURE_G/.engram"
+printf 'x' > "$FIXTURE_G/.engram/engram.db"
+
+run_ask_one_instance "$FIXTURE_G" "" "work" ""
+
+assert_eq "(g1) empty stdin exits non-zero instead of hanging" "1" "$STATUS"
+assert_match "(g1) says the input ran out" "Entrada agotada sin respuesta" "$OUT"
+assert_no_match "(g1) does not repeat the refusal" \
+    $'vacío aquí.*\n.*vacío aquí' "$OUT"
+
+# A value that fails validation sends the loop back to read; the stream is
+# empty from there on, which is exactly the state that used to spin.
+printf 'blocker\n' > "$FIXTURE_G/occupied"
+run_ask_one_instance "$FIXTURE_G" "" "work" $'~/occupied\n'
+
+assert_eq "(g2) input exhausted after a rejected value exits non-zero" "1" "$STATUS"
+assert_match "(g2) rejects the non-directory first" "no es una carpeta" "$OUT"
+assert_match "(g2) then reports the exhausted input" "Entrada agotada sin respuesta" "$OUT"
+
+rm -rf "$FIXTURE_G"
 
 # ---------------------------------------------------------------------------
 # Real $HOME was never read or written by any of the above.

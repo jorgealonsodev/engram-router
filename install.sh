@@ -659,7 +659,25 @@ ask_one_instance() {
         fi
         while :; do
             dir=""
-            read -r -p "  Carpeta (sin valor por defecto): " dir || dir=""
+            # read's exit status is the only way to tell "the user pressed
+            # Enter" from "there is no more input". They must not be treated
+            # alike here: this branch has no default to fall back on, so
+            # re-asking an exhausted stream would print the refusal and read
+            # EOF again forever, consuming nothing. The default-offering
+            # branch below is immune only because it collapses an EOF read
+            # into its default and leaves the loop on the first pass.
+            local read_ok=1
+            read -r -p "  Carpeta (sin valor por defecto): " dir || read_ok=0
+            # A failed read still yields a final line that had no trailing
+            # newline, so only a failure with nothing in hand is EOF.
+            if [[ $read_ok -eq 0 && -z "$dir" ]]; then
+                say ""
+                say "  Entrada agotada sin respuesta (EOF)."
+                say "  Esta pregunta no tiene valor por defecto a propósito: elegir por"
+                say "  usted arriesgaría arrancar '$name' con una base vacía, o adoptar"
+                say "  memorias que quizá no le corresponden. Instalación detenida."
+                exit 1
+            fi
             if [[ -z "$dir" ]]; then
                 say "  No se acepta un valor vacío aquí: escriba una ruta o 'nueva'."
                 continue
