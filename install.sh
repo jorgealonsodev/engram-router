@@ -248,7 +248,14 @@ _warn_token_loss_if_needed() {
         return 0
     fi
 
-    printf '\n*** AVISO: ESA LÍNEA ES LA ÚNICA COPIA DEL TOKEN ***\n\n'
+    # The heading agrees in number with what is actually listed below it: a
+    # message that says "esa línea" while printing two is the kind of small
+    # inaccuracy that makes a user doubt the rest of the warning.
+    case ${#token_locs[@]} in
+        0) printf '\n*** AVISO: NO SE CONOCE OTRA COPIA DEL TOKEN ***\n\n' ;;
+        1) printf '\n*** AVISO: ESA LÍNEA ES LA ÚNICA COPIA DEL TOKEN ***\n\n' ;;
+        *) printf '\n*** AVISO: ESAS LÍNEAS SON LA ÚNICA COPIA DEL TOKEN ***\n\n' ;;
+    esac
     if [[ ${#token_locs[@]} -gt 0 ]]; then
         printf 'ENGRAM_CLOUD_TOKEN está definido únicamente en:\n'
         printf '  - %s\n' "${token_locs[@]}"
