@@ -142,6 +142,30 @@ _cloud_json_token() {
     printf '%s\n' "$token"
 }
 
+# _classify_token_copy CLOUD_JSON_PATH [SUFFIX]
+# Classifies one cloud.json against the token that is live in this session.
+# Presence of *a* token is not enough: a copy only survives the remediation
+# if it holds the SAME value. A different non-empty token — rotated, revoked,
+# or belonging to another server — leaves the live credential exactly as
+# unrecoverable, so it is reported as OTHER and never counted as a survivor.
+# Reassuring the user on presence alone would turn this warning fail-open.
+_classify_token_copy() {
+    local cloud_json="$1" suffix="${2:-}" stored
+    if [[ ! -e "$cloud_json" ]]; then
+        printf 'MISSING:%s%s\n' "$cloud_json" "$suffix"
+        return 0
+    fi
+    if ! stored="$(_cloud_json_token "$cloud_json" 2>/dev/null)"; then
+        printf 'EMPTY:%s%s\n' "$cloud_json" "$suffix"
+        return 0
+    fi
+    if [[ "$stored" == "${ENGRAM_CLOUD_TOKEN:-}" ]]; then
+        printf 'SURVIVING:%s%s\n' "$cloud_json" "$suffix"
+    else
+        printf 'OTHER:%s%s\n' "$cloud_json" "$suffix"
+    fi
+}
+
 # _load_router_lib_best_effort
 # Sources lib/router.sh (installed copy first, repo copy as fallback — same
 # pattern as load_existing_config) so _router_json_parse_flat_object and
@@ -187,14 +211,7 @@ _survey_token_copies() {
     # place, so the repo copy is very often the only one available yet.
     _load_router_lib_best_effort || true
 
-    local cj="$HOME/.engram/cloud.json"
-    if [[ ! -e "$cj" ]]; then
-        printf 'MISSING:%s\n' "$cj"
-    elif _cloud_json_token "$cj" >/dev/null 2>&1; then
-        printf 'SURVIVING:%s\n' "$cj"
-    else
-        printf 'EMPTY:%s\n' "$cj"
-    fi
+    _classify_token_copy "$HOME/.engram/cloud.json"
 
     [[ -r "$CONFIG_FILE" ]] || return 0
     _load_router_lib_best_effort || return 0
@@ -206,13 +223,7 @@ _survey_token_copies() {
     for name in "${INSTANCE_NAMES[@]}"; do
         data_dir="$(router_expand_path "${INSTANCE_DATA_DIR[$name]}")"
         icj="$data_dir/cloud.json"
-        if [[ ! -e "$icj" ]]; then
-            printf 'MISSING:%s (instancia %s)\n' "$icj" "$name"
-        elif _cloud_json_token "$icj" >/dev/null 2>&1; then
-            printf 'SURVIVING:%s (instancia %s)\n' "$icj" "$name"
-        else
-            printf 'EMPTY:%s (instancia %s)\n' "$icj" "$name"
-        fi
+        _classify_token_copy "$icj" " (instancia $name)"
     done
 }
 
@@ -236,15 +247,16 @@ _warn_token_loss_if_needed() {
         [[ -n "$loc" ]] || continue
         case "$loc" in
             SURVIVING:*) surviving+=("${loc#SURVIVING:}") ;;
+            OTHER:*)     checked+=("${loc#OTHER:} (guarda otro token, no el activo)") ;;
             EMPTY:*)     checked+=("${loc#EMPTY:} (sin token)") ;;
             MISSING:*)   checked+=("${loc#MISSING:} (no existe)") ;;
         esac
     done < <(_survey_token_copies)
 
     if [[ ${#surviving[@]} -gt 0 ]]; then
-        printf 'AVISO: se ha encontrado otra copia del token, no vacía:\n'
+        printf 'AVISO: el token activo está guardado también en:\n'
         printf '  - %s\n' "${surviving[@]}"
-        printf 'Puede continuar con seguridad: esa copia sobrevive aunque se borren\nlas líneas de arriba.\n\n'
+        printf 'Puede continuar con seguridad: ese fichero guarda exactamente el mismo\nvalor, así que sobrevive aunque se borren las líneas de arriba.\n\n'
         return 0
     fi
 

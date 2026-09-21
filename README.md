@@ -113,7 +113,10 @@ tool adds an `instance` key to it rather than introducing a second marker file.
   instance points there unless you say so. The installer does offer it as a
   data directory to reuse; typing that path makes an instance adopt the
   existing database and enrollments in place, and still modifies nothing else.
-  Its `cloud.json` is never read by this tool — each instance carries its own.
+  Its `cloud.json` is read, never written: the installer's preflight looks
+  there for a surviving copy of a token it is about to tell you to delete.
+  Credentials are still per instance — nothing in `~/.engram/cloud.json` is
+  used to configure one.
 - **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
   `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
   `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It

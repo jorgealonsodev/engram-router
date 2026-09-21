@@ -196,6 +196,37 @@ assert_no_match "(b2) never prints the token value" "instance-token-99" "$OUT"
 rm -rf "$FIXTURE_B2"
 
 # ---------------------------------------------------------------------------
+# (b3) A cloud.json holding a DIFFERENT non-empty token is not a survivor.
+#      Presence alone used to satisfy the check, so a rotated, revoked or
+#      other-server token made the installer say "puede continuar con
+#      seguridad" right before the user deleted the only copy of the live
+#      credential. The warning has to stay fail-safe: reassure only on an
+#      exact match.
+# ---------------------------------------------------------------------------
+echo "== (b3) a different stored token is NOT a survivor =="
+
+FIXTURE_B3="$(mktemp -d)"
+mkdir -p "$FIXTURE_B3/.engram"
+printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "stale-token-from-last-year"\n}\n' \
+    > "$FIXTURE_B3/.engram/cloud.json"
+{
+    echo '# .bashrc'
+    echo 'export ENGRAM_CLOUD_TOKEN=live-token-abc'
+} > "$FIXTURE_B3/.bashrc"
+
+run_install "$FIXTURE_B3" "live-token-abc"
+
+assert_eq "(b3) still exits 1 (hazard itself is unchanged)" "1" "$STATUS"
+assert_match "(b3) warns: a different token does not save the live one" "ÚNICA COPIA DEL TOKEN" "$OUT"
+assert_no_match "(b3) does NOT reassure" "Puede continuar con seguridad" "$OUT"
+assert_match "(b3) reports the mismatch as checked" "guarda otro token, no el activo" "$OUT"
+assert_match "(b3) names the file it checked" "$FIXTURE_B3/.engram/cloud.json" "$OUT"
+assert_no_match "(b3) never prints the live token value" "live-token-abc" "$OUT"
+assert_no_match "(b3) never prints the stored token value" "stale-token-from-last-year" "$OUT"
+
+rm -rf "$FIXTURE_B3"
+
+# ---------------------------------------------------------------------------
 # (c) Env-only hazard, files already clean -> unchanged branch: no
 #     credential-loss warning (there are no lines to delete in the first
 #     place), same remediation text as before this feature existed.
