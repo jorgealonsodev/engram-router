@@ -369,6 +369,41 @@ assert_no_match "(e/absent) no restart step when no daemon is running" \
 rm -rf "$FIXTURE_E"
 
 # ---------------------------------------------------------------------------
+# (f) A symlinked dotfile is never handed a bare `sed -i` against the link.
+#     In-place sed renames the LINK to the .bak name and writes a new regular
+#     file in its place, so the managed source keeps its uncommented export
+#     while this machine looks fixed, and the following chmod follows the
+#     moved link and changes the source's mode. A dotfile farm (stow,
+#     chezmoi, yadm) is exactly where a shared .bashrc with a credential
+#     lives, so the command must target the resolved file instead.
+# ---------------------------------------------------------------------------
+echo "== (f) a symlinked dotfile targets its resolved file =="
+
+FIXTURE_F="$(mktemp -d)"
+mkdir -p "$FIXTURE_F/.engram" "$FIXTURE_F/dotfiles"
+printf '{\n  "server_url": "https://engram.xdev.es",\n  "token": "survivor-xyz"\n}\n' \
+    > "$FIXTURE_F/.engram/cloud.json"
+printf '# managed\nexport ENGRAM_CLOUD_TOKEN=survivor-xyz\n' > "$FIXTURE_F/dotfiles/bashrc"
+ln -s "$FIXTURE_F/dotfiles/bashrc" "$FIXTURE_F/.bashrc"
+
+run_install "$FIXTURE_F" "survivor-xyz"
+
+assert_eq "(f) exits 1" "1" "$STATUS"
+assert_match "(f) says the dotfile is a symlink" \
+    "es un enlace simbólico" "$OUT"
+assert_match "(f) the sed command targets the resolved file" \
+    "$FIXTURE_F/dotfiles/bashrc" "$OUT"
+assert_match "(f) the chmod targets the resolved file's backup" \
+    "chmod 600 $FIXTURE_F/dotfiles/bashrc.bak" "$OUT"
+assert_no_match "(f) no sed -i against the link itself" \
+    "ENGRAM_CLOUD_)/# \\1/' $FIXTURE_F/.bashrc" "$OUT"
+assert_no_match "(f) no chmod against the link's backup" \
+    "chmod 600 $FIXTURE_F/.bashrc.bak" "$OUT"
+assert_no_match "(f) never prints the token value" "survivor-xyz" "$OUT"
+
+rm -rf "$FIXTURE_F"
+
+# ---------------------------------------------------------------------------
 # Real $HOME was never read or written by any of the above.
 # ---------------------------------------------------------------------------
 echo "== real \$HOME isolation =="

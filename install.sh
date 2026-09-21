@@ -91,10 +91,33 @@ _print_comment_lines_step() {
     printf '     que el original (a menudo legible por cualquiera) y esa copia\n'
     printf '     sigue conteniendo el token, así que el chmod de abajo es parte\n'
     printf '     del mismo paso, no un extra:\n\n'
-    local f qf qbak line
+    local f target qf qbak line
     for f in "$@"; do
-        qf="$(printf '%q' "$f")"
-        qbak="$(printf '%q' "${f}.bak")"
+        # A symlinked dotfile — a stow/chezmoi/yadm farm, which is exactly
+        # where a shared .bashrc with an exported credential tends to live —
+        # must not be handed a bare `sed -i`. In-place sed does not follow
+        # the link: it renames the LINK to the .bak name and writes a new
+        # regular file in its place, so the managed source keeps the
+        # uncommented export while this machine looks fixed. The `chmod`
+        # then follows that moved link and changes the source's mode
+        # instead of the backup's. Measured: all four effects reproduce.
+        target="$f"
+        if [[ -L "$f" ]]; then
+            target="$(_resolve_abs_path "$f")"
+            if [[ "$target" == "$f" || ! -e "$target" ]]; then
+                # No usable resolution (a BSD readlink without -f, or a
+                # broken link). Printing a command that would quietly move
+                # the link aside is worse than printing none.
+                printf '       # %s es un enlace simbólico y no se ha podido\n' "$f"
+                printf '       # resolver su destino: edítelo a mano en el fichero real,\n'
+                printf '       # no con sed -i sobre el enlace.\n'
+                continue
+            fi
+            printf '       # %s es un enlace simbólico: se edita su destino real\n' "$f"
+            printf '       # para no reemplazar el enlace por un fichero suelto.\n'
+        fi
+        qf="$(printf '%q' "$target")"
+        qbak="$(printf '%q' "${target}.bak")"
         line="       sed -i.bak -E 's/^([[:space:]]*(export[[:space:]]+)?ENGRAM_CLOUD_)/# \\1/' $qf"
         printf '%s\n' "$line"
         printf '       chmod 600 %s\n' "$qbak"
