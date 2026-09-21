@@ -177,15 +177,50 @@ Emerged while using it:
       exists but `cloud status` has no equivalent — so it now fails honestly:
       a missing label is reported as a possible format change rather than as a
       configuration problem, and `engram-doctor` warns on version drift.
-- [ ] P9 The default data-directory answer starts an instance on an empty
-      database while an existing install's memories stay in ~/.engram,
-      unreferenced. Nothing fails and nothing warns. Documented in the README
-      (cdaeb31, 981d05a); consider whether the installer should detect an
-      existing Engram root and offer it rather than only accept it typed.
+- [x] P9 The default data-directory answer started an instance on an empty
+      database while an existing install's memories stayed in ~/.engram,
+      unreferenced — nothing failed and nothing warned. The installer now
+      probes ~/.engram and $ENGRAM_DATA_DIR before asking, and when it finds
+      a root no instance has claimed it reports the root with its size and
+      counts and drops its default entirely: an empty answer is refused, so
+      nobody lands on an empty database by pressing Enter. A root already
+      claimed earlier in the run is not offered again, so a second instance
+      is never pushed toward the first one's database. Counts are read with
+      `sqlite3 -readonly` and reported as unreadable rather than estimated
+      when sqlite3 is missing or the file will not parse.
+      Commits e209dce, cd05400. Evidence: 29/29 on the new suite, 35/35
+      router, 32/32 token warning, 19/19 contract against real Engram 2.0.0,
+      shellcheck clean, and the read-only queries run against the live
+      63.5 MB database (3373 observations, 35 projects) with its WAL
+      untouched.
+      Review lineage review-1cf22636190b081b, approved, acknowledgement
+      burned. It caught one CRITICAL from two lenses: the no-default prompt
+      spun forever on stdin EOF, because refusing an empty answer and
+      re-reading consumes nothing once the stream is finished. Proven
+      standalone at five iterations and zero bytes read, fixed in cd05400,
+      and the harness now runs under `timeout` so a non-terminating prompt
+      fails a check instead of hanging the suite.
 
 - [ ] P8 With more than one contributor, commits should stop going straight to
       `main`: a branch and a pull request per change, especially for a tool
       whose failures are silent.
+
+Advisory findings left open by the P9 review (non-blocking, recorded so they
+are not rediscovered). Highest value first:
+
+- [ ] P10 `_root_is_claimed` compares resolved paths as strings, so a root
+      reached through a symlink or a differently-spelled path is not
+      recognised as claimed and could be offered twice. Same class:
+      `_existing_engram_roots` probes only ~/.engram and $ENGRAM_DATA_DIR,
+      and `_describe_engram_root` depends on GNU `stat -c` and on bash 4
+      associative arrays, which macOS ships neither of by default —
+      the README claims macOS support.
+- [ ] P11 The answer `nueva` is a bare sentinel: a user whose directory is
+      genuinely named `nueva` cannot express it, and no other input is
+      normalised the same way.
+- [ ] P12 The new test harness reads its result from the last line of
+      output, so anything printed afterwards silently changes what is
+      asserted.
 
 Operational, per person rather than per project:
 
