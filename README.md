@@ -162,17 +162,31 @@ are per person; this repository ships none. Credentials go into that instance's
 
 ### The data directory question, if you already use Engram
 
-The default answer for an instance's data directory is a new, empty
-`~/.local/share/engram-<name>`. Accepting it is right for a fresh instance and
-wrong for the one that should inherit what you already have: memories in
-`~/.engram` stay where they are, and that instance starts from an empty
-database. Nothing fails and nothing warns — the repositories it routes simply
-find no history.
+Before asking for a brand-new instance's data directory, the installer
+probes for an existing Engram installation: `~/.engram` (Engram's own
+default root) and, if set to somewhere else, `$ENGRAM_DATA_DIR`. A root
+counts as existing when it holds an `engram.db`.
 
-If an existing installation should keep serving your memories, type its path
-at that prompt (`~/.engram` is the usual one). The installer detects the
-database already there and adopts it in place. Then move individual projects
-to the other instances with `engram-migrate`, rather than starting them empty.
+If it finds one that is not already claimed by an instance you configured
+earlier — in `router.json` from a previous run, or earlier in this same
+run — the prompt reports it, with size and (when `sqlite3` is available) how
+many observations and projects it holds, and drops its usual default
+entirely: an empty answer is refused and re-asked, so you cannot land on a
+new empty database by pressing Enter without noticing. Type the reported
+path to adopt it, or the word `nueva` to start with a fresh
+`~/.local/share/engram-<name>` instead.
+
+If `sqlite3` is not available, or the database cannot be read, the installer
+still reports the detection and the file's size, and says plainly which
+counts it could not read — it never guesses a number.
+
+Once an instance already exists (you are modifying it, not creating it) this
+detection does not apply: its current directory stays the default, as
+before. The same is true for a root an earlier instance in the same run
+already claimed — it is not offered again to a second instance.
+
+Then move individual projects to the other instances with `engram-migrate`,
+rather than starting them empty.
 
 ### What it refuses
 

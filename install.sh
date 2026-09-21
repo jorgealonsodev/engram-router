@@ -466,6 +466,161 @@ ask_namespaces_for() {
     printf '%s' "${collected[*]-}"
 }
 
+# ---------------------------------------------------------------------------
+# Existing-root detection (P9) — probed BEFORE ask_one_instance offers a
+# default, so a brand-new instance never silently starts on an empty
+# database while an existing installation's memories sit unreferenced in
+# ~/.engram. See odd/tasks/engram-multi-cloud-router.md for the incident
+# this guards against.
+# ---------------------------------------------------------------------------
+
+# _resolve_abs_path VALUE
+# Expands ~/$HOME the same way router_expand_path does, then canonicalizes
+# with readlink -f. Works even when the path does not exist yet (GNU
+# readlink -f does not require the target to exist), which matters for a
+# configured-but-not-yet-created instance directory. Falls back to the
+# expanded-but-unresolved path if router.sh cannot be loaded or readlink
+# fails, so comparisons degrade gracefully instead of erroring out.
+_resolve_abs_path() {
+    declare -f router_expand_path >/dev/null 2>&1 || _load_router_lib_best_effort || true
+    local p="$1"
+    if declare -f router_expand_path >/dev/null 2>&1; then
+        p="$(router_expand_path "$p")"
+    else
+        p="${p/#\~/$HOME}"
+    fi
+    readlink -f -- "$p" 2>/dev/null || printf '%s\n' "$p"
+}
+
+# _shorten_home ABS_PATH
+# Cosmetic inverse of the $HOME expansion above, only for display.
+_shorten_home() {
+    local p="$1"
+    if [[ "$p" == "$HOME" ]]; then
+        printf '~'
+    elif [[ "$p" == "$HOME"/* ]]; then
+        # Literal display text, not a path meant to expand — shellcheck
+        # cannot tell the difference from a quoting mistake.
+        # shellcheck disable=SC2088
+        printf '~/%s' "${p#"$HOME"/}"
+    else
+        printf '%s' "$p"
+    fi
+}
+
+# _existing_engram_roots
+# Prints one resolved absolute path per line for every candidate root that
+# contains engram.db: $HOME/.engram first, then $ENGRAM_DATA_DIR if set and
+# different, de-duplicated by resolved path.
+_existing_engram_roots() {
+    local -a candidates=("$HOME/.engram")
+    [[ -n "${ENGRAM_DATA_DIR:-}" ]] && candidates+=("$ENGRAM_DATA_DIR")
+
+    local -A seen_roots=()
+    local c abs
+    for c in "${candidates[@]}"; do
+        abs="$(_resolve_abs_path "$c")"
+        [[ -n "${seen_roots[$abs]:-}" ]] && continue
+        seen_roots[$abs]=1
+        [[ -e "$abs/engram.db" ]] && printf '%s\n' "$abs"
+    done
+}
+
+# _root_is_claimed ROOT
+# A root is claimed when it resolves to the same path as a directory already
+# pushed this run (INSTANCE_DIRS, a global array populated by push_instance —
+# see ask_instances). By the time ask_one_instance is asked for a brand-new
+# instance, every instance kept or configured earlier in this same run —
+# whether loaded from router.json or just typed — has already been pushed,
+# so this one check covers both "already in router.json" and "chosen earlier
+# in this run" without consulting router.json a second time.
+_root_is_claimed() {
+    local root="$1" d
+    for d in ${INSTANCE_DIRS[@]+"${INSTANCE_DIRS[@]}"}; do
+        [[ -n "$d" ]] || continue
+        [[ "$(_resolve_abs_path "$d")" == "$root" ]] && return 0
+    done
+    return 1
+}
+
+# _human_size_mb BYTES
+# Formats a byte count as "N.N MB" (or "N.NN GB" past 1 GiB), matching the
+# style used elsewhere in this installer's output.
+_human_size_mb() {
+    # LC_ALL=C: the locale's decimal separator must not leak into a
+    # figure that later gets compared/matched as "N.N MB".
+    LC_ALL=C awk -v b="$1" 'BEGIN {
+        mb = b / 1048576
+        if (mb >= 1024) { printf "%.2f GB", mb / 1024 } else { printf "%.1f MB", mb }
+    }'
+}
+
+# _describe_engram_root ROOT
+# Prints "<size>, <N observaciones>, <M proyectos>" for the engram.db under
+# ROOT. Reads the database the same way bin/engram-migrate does — same
+# table (observations), same "not deleted" filter (deleted_at IS NULL) — but
+# opened with sqlite3's own -readonly flag: a live `engram serve` may hold
+# this file in WAL mode, and this call must never take a write lock or
+# create/modify -wal/-shm state. If sqlite3 is missing or the query fails,
+# reports that plainly instead of fabricating a number — the exact failure
+# mode this installer exists to avoid.
+_describe_engram_root() {
+    local root="$1"
+    local db="$root/engram.db"
+    local size_bytes size_str obs proj obs_str proj_str
+
+    if size_bytes="$(stat -c %s "$db" 2>/dev/null)" && [[ -n "$size_bytes" ]]; then
+        size_str="$(_human_size_mb "$size_bytes")"
+    else
+        size_str="tamaño desconocido"
+    fi
+
+    if command -v sqlite3 >/dev/null 2>&1; then
+        obs="$(sqlite3 -readonly "$db" \
+            "SELECT COUNT(*) FROM observations WHERE deleted_at IS NULL;" 2>/dev/null || true)"
+        proj="$(sqlite3 -readonly "$db" \
+            "SELECT COUNT(DISTINCT project) FROM observations WHERE deleted_at IS NULL;" 2>/dev/null || true)"
+        if [[ "$obs" =~ ^[0-9]+$ ]]; then
+            obs_str="$obs observaciones"
+        else
+            obs_str="no se pudo leer el número de observaciones"
+        fi
+        if [[ "$proj" =~ ^[0-9]+$ ]]; then
+            proj_str="$proj proyectos"
+        else
+            proj_str="no se pudo leer el número de proyectos"
+        fi
+    else
+        obs_str="no se pudo leer el número de observaciones (sqlite3 no disponible)"
+        proj_str="no se pudo leer el número de proyectos (sqlite3 no disponible)"
+    fi
+
+    printf '%s, %s, %s' "$size_str" "$obs_str" "$proj_str"
+}
+
+# _validate_instance_dir DIR
+# The path checks ask_one_instance has always run, factored out so both the
+# normal-default prompt and the no-default detection prompt share exactly
+# one implementation.
+_validate_instance_dir() {
+    local dir="$1"
+    # Caught early because mkdir would otherwise abort the whole install
+    # several steps later, after credentials had already been typed.
+    if [[ -e "$dir" && ! -d "$dir" ]]; then
+        say "  '$dir' existe y no es una carpeta. Elija otra ruta."
+        return 1
+    fi
+    if [[ ! -e "$dir" ]]; then
+        local parent="$dir"
+        while [[ ! -e "$parent" && "$parent" != "/" ]]; do parent="$(dirname "$parent")"; done
+        if [[ ! -w "$parent" ]]; then
+            say "  No hay permiso de escritura en '$parent'. Elija otra ruta."
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Asks for one instance's directory, credentials and namespaces. Used both for
 # a brand-new instance and for modifying one that already exists.
 ask_one_instance() {
@@ -473,32 +628,63 @@ ask_one_instance() {
 
     local default_dir="${cur_dir:-$HOME/.local/share/engram-$name}" dir=""
     say "  Carpeta donde '$name' guardará su base de datos."
-    say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
-    say "  instalación de Engram que ya exista para reutilizar sus memorias."
-    say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
-    while :; do
-        dir=""
-        read -r -p "  Carpeta [Enter = $default_dir]: " dir || dir=""
-        dir="${dir:-$default_dir}"
-        dir="${dir/#\~/$HOME}"
-        # Caught early because mkdir would otherwise abort the whole install
-        # several steps later, after credentials had already been typed.
-        if [[ -e "$dir" && ! -d "$dir" ]]; then
-            say "  '$dir' existe y no es una carpeta. Elija otra ruta."
-            dir=""
-            continue
+
+    # Detection only applies to a brand-new instance (cur_dir empty). When
+    # modifying one that already exists, its current directory stays the
+    # default — forcing an explicit answer there would be a needless trap
+    # for someone just changing namespaces.
+    local -a unclaimed_roots=()
+    if [[ -z "$cur_dir" ]]; then
+        local root
+        while IFS= read -r root; do
+            [[ -n "$root" ]] || continue
+            _root_is_claimed "$root" || unclaimed_roots+=("$root")
+        done < <(_existing_engram_roots)
+    fi
+
+    if [[ ${#unclaimed_roots[@]} -gt 0 ]]; then
+        say "  DETECTADA una instalación de Engram existente:"
+        for root in "${unclaimed_roots[@]}"; do
+            say "    $(_shorten_home "$root")  ->  $(_describe_engram_root "$root")"
+        done
+        say ""
+        say "  Ninguna instancia la está usando todavía. Si empieza con una"
+        say "  carpeta nueva, esas memorias siguen ahí pero NINGUNA instancia"
+        say "  las verá: los repos que enrute encontrarán una base vacía."
+        say ""
+        if [[ ${#unclaimed_roots[@]} -eq 1 ]]; then
+            say "  Escriba $(_shorten_home "${unclaimed_roots[0]}") para adoptarla, o 'nueva' para empezar vacío."
+        else
+            say "  Escriba una de las rutas de arriba para adoptarla, o 'nueva' para empezar vacío."
         fi
-        if [[ ! -e "$dir" ]]; then
-            local parent="$dir"
-            while [[ ! -e "$parent" && "$parent" != "/" ]]; do parent="$(dirname "$parent")"; done
-            if [[ ! -w "$parent" ]]; then
-                say "  No hay permiso de escritura en '$parent'. Elija otra ruta."
-                dir=""
+        while :; do
+            dir=""
+            read -r -p "  Carpeta (sin valor por defecto): " dir || dir=""
+            if [[ -z "$dir" ]]; then
+                say "  No se acepta un valor vacío aquí: escriba una ruta o 'nueva'."
                 continue
             fi
-        fi
-        break
-    done
+            if [[ "$dir" == "nueva" ]]; then
+                dir="$default_dir"
+            else
+                dir="${dir/#\~/$HOME}"
+            fi
+            _validate_instance_dir "$dir" || { dir=""; continue; }
+            break
+        done
+    else
+        say "  Pulse Enter para crear una nueva ahí, o escriba la ruta de una"
+        say "  instalación de Engram que ya exista para reutilizar sus memorias."
+        say "  Formato: ruta absoluta, o empezando por ~ (ej: ~/.engram)."
+        while :; do
+            dir=""
+            read -r -p "  Carpeta [Enter = $default_dir]: " dir || dir=""
+            dir="${dir:-$default_dir}"
+            dir="${dir/#\~/$HOME}"
+            _validate_instance_dir "$dir" || { dir=""; continue; }
+            break
+        done
+    fi
 
     # Reusing an existing installation root keeps its memories, its enrollments
     # and its sync cursors; a fresh directory silently starts from an empty
