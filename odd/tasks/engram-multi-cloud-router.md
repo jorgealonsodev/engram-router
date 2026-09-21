@@ -147,13 +147,20 @@ Emerged after the original breakdown:
 
 Emerged while using it:
 
-- [ ] P5 Only one project has been migrated. The rest still live in whichever
-      instance predates the split, and `engram-migrate` handles them one
-      repository at a time.
-- [ ] P6 Per-instance systemd units are installed but not enabled, so nothing
-      replicates on its own. Decide whether autosync should be on per instance,
-      remembering it is opt-in and that a resident daemon freezes its
-      environment at exec.
+- [x] P5 Six projects now live in `trabajo`: mcp-mysql, mcp-hana,
+      esp32-ble-wearos, copobrasil.com, mqtt_wear_pack, vioncasbake206.
+      The last five were found by cross-checking every enrolled project's
+      `git remote` against the routing rules rather than against its name —
+      `copobrasil.com` and `vioncasbake206` read as personal and are not.
+      All five had been replicating to the personal cloud since August.
+      Counts matched on every migration (25·25, 11·11, 24·24, 2·2, 6·6) and
+      each reached engram.etic.cloud at 1/1 chunks, pending 0. Seven projects
+      remain in `personal` and every one of them is genuinely personal.
+- [x] P6 Both instances now autosync: trabajo on 7437 to engram.etic.cloud,
+      personal on 7438 to engram.xdev.es, both units enabled so they survive a
+      reboot. Neither daemon carries ENGRAM_CLOUD_SERVER or ENGRAM_CLOUD_TOKEN;
+      each reads its own cloud.json, which is the whole mechanism working.
+      Enabling the second one is what exposed T12 below.
 - [x] P7 Parsing text meant for humans is unavoidable — `engram doctor --json`
       exists but `cloud status` has no equivalent — so it now fails honestly:
       a missing label is reported as a possible format change rather than as a
@@ -167,6 +174,45 @@ Operational, per person rather than per project:
 - Rotate any token that has been exposed. Tokens reach crash dumps, terminal
   transcripts and world-readable rc files; `engram-doctor` catches only the
   file modes.
+
+Emerged on 2026-09-21, while making the tool actually run on a real machine.
+Every one of these predates that day's work; none was introduced by it.
+
+- [x] T12 The systemd template never passed a port, so every instance bound
+      7437 and two could never coexist — the project's central use case. The
+      second instance printed `[autosync] started` and died one line later,
+      which is a trap: the reassuring line comes first. `router.example.json`
+      documented `port` per instance and `lib/router.sh` parsed it into
+      INSTANCE_PORT, but `install.sh` never wrote it and the unit never read
+      it. install.sh now assigns the first free port from 7437, stable across
+      re-runs; the unit passes `serve $ENGRAM_PORT`, which systemd drops
+      entirely when unset, so old installs fall back to 7437 unchanged.
+      Commit f6c6ff2. Evidence: 42/42 router, 10/10 new suite, 19/19 contract,
+      shellcheck clean.
+- [x] T13 `engram-migrate` migrated the source's local database, never the
+      source's cloud, so anything living only on the old server stayed
+      stranded while the summary still printed "Hecho". It now pulls the
+      source cloud first and refuses to continue when that pull fails; a
+      source with no cloud.json is the one case that proceeds, with a reason.
+      Commit d9e3921. Evidence: 29/29 new suite, and the fail-closed path
+      verified to work because the script sets `pipefail` — without it the
+      `|| die` after a pipe would never fire.
+
+- [ ] T14 `engram-where` prints `estado: enrolled` whenever the instance has a
+      readable cloud.json. It never queries `sync_enrolled_projects`, so it
+      reported `enrolled` for a project enrolled in neither instance. The one
+      line meant to tell you whether a repo will replicate does not measure
+      that.
+- [ ] T15 The systemd template derives ENGRAM_DATA_DIR from the instance name
+      instead of reading router.json's `data_dir`. An instance that adopted an
+      existing Engram root gets an empty directory and serves nothing, with no
+      warning. Worked around on this machine with a per-instance EnvironmentFile
+      entry; unfixed in the repository.
+- [ ] T16 `engram-migrate` parses router.json with its own `sed`, which cannot
+      cross newlines, so any valid reformatting breaks it — and it then blames
+      the user's configuration ("la instancia no está en router.json") instead
+      of admitting it could not parse. `lib/router.sh` already has the parser
+      it should be using.
 
 ## Progress notes
 
