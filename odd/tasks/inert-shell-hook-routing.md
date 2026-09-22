@@ -127,3 +127,19 @@ exactly as they do today.
 
 ## Progress
 (evidence per task: commit id, checks observed, assessed RDD tier and outcome)
+
+- T1 — commit `c9f047f`. Route: delegated writer (sonnet); trigger: 2 non-trivial
+  files. TDD observed: RED 13/24 passed → GREEN 24/24 → REFACTOR 24/24.
+  Checks: `bash tests/test_hook.sh` 24/24; `bash tests/test_router.sh` 42/42;
+  `bash -n bin/engram-router` ok; `bash -n <(hook bash)` ok; `zsh -n <(hook zsh)`
+  ok (zsh 5.9 present, functional smoke test too). Parent spot check re-ran
+  both test files: identical. RDD assess: high (`shell_process` in the test).
+  Native review: consent granted by the user; lineage created with four lenses;
+  all four provider-issued `capture-result` slots refused at preflight
+  (`invalid_request`: tokens carry neither `--agent` nor `--input`); exact
+  STATUS re-query reoffered identical tokens. Equivalent open defect found:
+  Gentleman-Programming/gentle-ai#4804 (3.4.0 stable, same shape); one
+  occurrence comment posted, no labels touched. Candidate-scoped decline run
+  once and validated (`declined_this_candidate`). Verification of record for
+  this task therefore follows the RDD-off tier (high): writer self-verification
+  above plus an independent verifier — result recorded below.
