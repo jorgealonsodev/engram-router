@@ -126,7 +126,15 @@ EOF
 retire_legacy_shim() {
     local shim="$PREFIX_BIN/engram"
 
-    [[ -f "$shim" && ! -L "$shim" ]] || return 0
+    if [[ -L "$shim" ]]; then
+        section "Retirando el shim antiguo"
+        say "AVISO: $shim es un enlace simbólico. Se deja intacto: el enrutado ya"
+        say "       no depende de ningún fichero llamado 'engram' en el PATH, así"
+        say "       que no hace falta tocarlo."
+        return 0
+    fi
+
+    [[ -f "$shim" ]] || return 0
 
     if grep -q 'engram-router-shim' "$shim" 2>/dev/null; then
         section "Retirando el shim antiguo"

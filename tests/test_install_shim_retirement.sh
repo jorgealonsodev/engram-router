@@ -54,6 +54,14 @@ _real_home_snapshot() {
       find "$HOME/.local/bin" -maxdepth 1 -name 'engram*' 2>/dev/null
       find "$HOME/.local/lib/engram-router" -type f 2>/dev/null
       find "$HOME/.config/systemd/user" -maxdepth 1 -name 'engram@.service' 2>/dev/null
+      # Mirrors install.sh's own DOTFILES_TO_SCAN, so "no dotfile is ever
+      # edited" is actually defended by this snapshot instead of just the
+      # engram-router-owned paths above.
+      local f
+      for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" \
+               "$HOME/.zshrc" "$HOME/.zprofile"; do
+          [[ -e "$f" ]] && printf '%s\n' "$f"
+      done
     } | sort | xargs -r md5sum 2>/dev/null
 }
 REAL_HOME_BEFORE="$(_real_home_snapshot)"
@@ -104,7 +112,7 @@ fi
 # ===========================================================================
 FIXTURE1="$(mktemp -d)"
 mkdir -p "$FIXTURE1/home"
-trap_cleanup() { rm -rf "$FIXTURE1" "${FIXTURE2:-}" "${FIXTURE3:-}" "${FIXTURE4:-}" "${FIXTURE5:-}" "${FIXTURE6:-}"; }
+trap_cleanup() { rm -rf "$FIXTURE1" "${FIXTURE2:-}" "${FIXTURE3:-}" "${FIXTURE_SYM:-}" "${FIXTURE4:-}" "${FIXTURE5:-}" "${FIXTURE6:-}"; }
 trap trap_cleanup EXIT
 
 BIN1="$FIXTURE1/home/.local/bin"
@@ -175,6 +183,38 @@ else
 fi
 assert_match "output warns that the foreign file is not ours" \
     'no es nuestro|ajeno|no pertenece' "$out3"
+
+# ===========================================================================
+# 4b) A symlink at $PREFIX_BIN/engram — even one pointing at a marker-
+#     carrying file — is left untouched, as a symlink, and the installer
+#     says so (retire_legacy_shim currently returns silently for symlinks).
+# ===========================================================================
+FIXTURE_SYM="$(mktemp -d)"
+mkdir -p "$FIXTURE_SYM/home/.local/bin"
+BIN_SYM="$FIXTURE_SYM/home/.local/bin"
+cat > "$FIXTURE_SYM/home/.local/marker-target" <<'EOF'
+#!/usr/bin/env bash
+# engram-router-shim: identifies this file to the other tools.
+echo "stale shim via symlink"
+EOF
+chmod 0755 "$FIXTURE_SYM/home/.local/marker-target"
+ln -s "$FIXTURE_SYM/home/.local/marker-target" "$BIN_SYM/engram"
+symlink_target_before="$(readlink "$BIN_SYM/engram")"
+
+echo
+echo "== a symlink at \$PREFIX_BIN/engram (even at a marker file) is left untouched, and reported =="
+out_sym="$(run_install "$FIXTURE_SYM/home" </dev/null 2>&1)"
+if [[ -L "$BIN_SYM/engram" ]]; then
+    _pass "\$PREFIX_BIN/engram symlink still exists as a symlink"
+    symlink_target_after="$(readlink "$BIN_SYM/engram")"
+    assert_eq "symlink target is unchanged" "$symlink_target_before" "$symlink_target_after"
+else
+    _fail "\$PREFIX_BIN/engram symlink still exists as a symlink" "not a symlink (or missing) after install"
+    _fail "symlink target is unchanged" "symlink missing"
+fi
+assert_match "output mentions the symlink was left alone" \
+    'enlace simbólico|symlink' "$out_sym"
+rm -rf "$FIXTURE_SYM"
 
 # ===========================================================================
 # 5) verify_no_shadowing: function-level tests via sourcing install.sh.

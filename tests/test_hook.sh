@@ -278,13 +278,16 @@ echo "== the function never shadows the real binary on PATH =="
 DRIVER_TYPEP="$FIXTURE/driver_typep.sh"
 cat >"$DRIVER_TYPEP" <<EOF
 eval "\$(cat '$HOOK_BASH')"
-printf 'TYPE_P=%s\n' "\$(type -P engram)"
 printf 'CHILD_CV=%s\n' "\$(bash -c 'command -v engram')"
 EOF
 _run_driver "$DRIVER_TYPEP" "$NORMAL_PATH"
-type_p="$(sed -n 's/^TYPE_P=//p' "$DRV_OUT")"
 child_cv="$(sed -n 's/^CHILD_CV=//p' "$DRV_OUT")"
-assert_eq "'type -P engram' still resolves to the stub binary path" "$STUB_DIR/engram" "$type_p"
+# Note: this file used to also assert "type -P engram" resolves to the stub
+# from the *same* shell that defines the engram() function. That assertion
+# was vacuous: bash's `type -P` always bypasses shell functions, exported or
+# not, so it would pass even if the function did shadow the binary. The
+# child-shell 'command -v engram' check below is the discriminating one — it
+# proves the function is invisible to other processes (never `export -f`'d).
 assert_eq "a child shell's 'command -v engram' also resolves to the stub (function not exported)" "$STUB_DIR/engram" "$child_cv"
 
 echo

@@ -72,7 +72,7 @@ exactly as they do today.
   and follow the tier. First boundary: `58f8970`.
 
 ## Tasks
-- [ ] T1 — `engram-router hook <bash|zsh>` emits shell integration.
+- [x] T1 — `engram-router hook <bash|zsh>` emits shell integration.
       On every directory change (bash `PROMPT_COMMAND`, zsh `chpwd`) resolve
       routing for `$PWD` via `router_resolve`; export `ENGRAM_DATA_DIR` when
       resolved, unset it when not; cache by `$PWD` so the prompt does not pay
@@ -87,7 +87,7 @@ exactly as they do today.
       function shadows nothing on PATH).
       Route: delegated writer. Checks: `bash tests/test_hook.sh`,
       `bash tests/test_router.sh`.
-- [ ] T2 — Retire the PATH shim.
+- [x] T2 — Retire the PATH shim.
       Delete `bin/engram`. `install.sh`: stop installing it; if
       `$PREFIX_BIN/engram` exists AND carries the `engram-router-shim` marker,
       remove it and say so; if it exists without the marker, leave it and warn.
@@ -98,7 +98,7 @@ exactly as they do today.
       HOME: stale marker shim removed, foreign binary preserved with warning,
       no `engram` installed into `$PREFIX_BIN`).
       Route: delegated writer. Checks: new test, `bash tests/test_install_port.sh`.
-- [ ] T3 — Doctor invariants.
+- [x] T3 — Doctor invariants.
       Replace `check_path_precedence` with `check_no_shadowing` (fail if
       `command -v engram` resolves to a marker file: "run the installer to
       remove the retired shim") and add `check_hook_active` (warn when the
@@ -106,7 +106,7 @@ exactly as they do today.
       resolves to an instance; ok when it matches; fail when it points at a
       different instance than routing says). Tests: `tests/test_doctor_hook.sh`.
       Route: delegated writer. Checks: new test, all existing tests.
-- [ ] T4 — Docs and closure.
+- [x] T4 — Docs and closure.
       README: replace the shim/PATH-precedence sections with the hook line,
       how inheritance reaches MCP children, what is not covered
       (desktop-launched agents), and the removed-shim upgrade note.
@@ -182,3 +182,77 @@ exactly as they do today.
   `$PREFIX_BIN/engram` is correctly left alone but not reported;
   `_real_home_snapshot` in the new test does not cover the scanned dotfiles.
   T2 checked off.
+- T3 — commit `0e34ac3`. Route: delegated writer (sonnet); trigger: 2
+  non-trivial files. TDD observed: RED 5/22 → GREEN 22/22 (one test assumption
+  corrected on the way: bash repopulates `$SHELL` when unset, so the
+  unknown-shell case uses an explicit `/usr/bin/fish`). Checks:
+  `bash tests/test_doctor_hook.sh` 22/22; `test_install_port.sh` 10/10;
+  `test_hook.sh` 24/24; `test_router.sh` 42/42;
+  `test_install_shim_retirement.sh` 25/25; `bash -n bin/engram-doctor` ok; no
+  `check_path_precedence`/`precedencia` left. Parent spot check re-ran the new
+  test and `test_install_port.sh`: identical; read both new checks and the
+  `main()` wiring. RDD assess from the boundary: high. Native preflight via the
+  canonical STATUS with `--agent claude-code`, scoped to this commit
+  (`--base-ref 2cf16d8`): consent granted; lineage review-b96df8147ed044e9;
+  all four lenses admitted. Final capture closed `correction_required` with
+  two candidate-caused CRITICAL findings (R2-subshell-global-contract,
+  R4-subshell-drops-router-globals): `check_current_repo_routing` called the
+  routing helper inside `$(...)`, so the ROUTER_* globals died in the subshell
+  and the routing report only looked right because `check_hook_active` had
+  populated them earlier — an ordering coupling no test guarded. Real defect
+  missed by the writer, the parent readback and the suite. Correction plan
+  captured (60 lines); bounded correction delegated and committed as
+  `68896df` (13+11 doctor, 36+0 test; the isolated-section test is RED without
+  the fix, GREEN with it; full suite green). Targeted validation
+  (`review.capture-validation`) then refused twice at preflight with
+  `repository_context_unavailable` on the rctx2 handle the lineage STATUS
+  itself reissues — equivalent open defect gentle-ai#4664. User chose
+  report-and-continue: one occurrence comment posted on #4664, no labels
+  touched. The captured candidate-scoped decline could not run:
+  `stale_target_identity` (the correction commit changed the candidate tree
+  after the consent envelope was issued); per contract no substitute
+  invocation was synthesised. Lineage left open at
+  `targeted_validation_required`; it gates nothing. Verification of record
+  for T3 + correction follows the RDD-off tier (high): writer
+  self-verification above plus an independent verifier of 68896df.
+  Independent verifier (sonnet, read-only, clean worktree of 68896df):
+  reproduced the defect against 0e34ac3's doctor (reset globals → "sin
+  instancia resuelta") and its absence at 68896df; full suite 24/24, 10/10,
+  24/24, 42/42, 25/25, 19/19, 29/29, `bash -n` ok; all five hook branches,
+  `set -u` safety, spaces in data dirs, symlink invocation and exit status
+  confirmed; verdict pass. Two low pre-existing notes recorded as follow-ups
+  (not this feature): `check_no_shadowing` reports "nada lo ensombrece" when
+  the resolved file is unreadable (grep fails silently); trailing-slash
+  tolerance strips one slash only. T3 checked off.
+- T4 — commit recorded below (this note travels in it). Route: delegated
+  writer (sonnet); trigger: 4 files. TDD observed for the one behaviour
+  change: RED 27/28 (symlink at `$PREFIX_BIN/engram` not reported) → GREEN
+  28/28. Changes: README `## Shell integration` (hook line, resolver, `engram`
+  function, MCP-child inheritance, doctor checks, the three limitations, the
+  upgrade note; shim row removed from the file table; every "shim must win on
+  PATH" sentence replaced); `retire_legacy_shim` now reports and leaves a
+  symlink; `_real_home_snapshot` covers the scanned dotfiles; the vacuous
+  `type -P` sub-assertion dropped from `test_hook.sh`. Checks: 28/28, 23/23,
+  24/24, 10/10, 42/42, 19/19, 29/29; `bash -n` on all scripts ok. Parent spot
+  check re-ran the two changed test files: identical; README privacy scan
+  clean (only a `/home/you/…` placeholder); read the new section and the
+  symlink branch. All four tasks checked off.
+
+## Follow-ups (recorded, not in scope)
+- Make `~/.engram` a cloud-less quarantine instance and move the personal
+  cloud to a named instance, so desktop-launched agents fail closed too
+  (migrates live memories; needs its own decision).
+- `check_no_shadowing` should fail, not pass, when the resolved `engram` is
+  unreadable (grep fails silently today); trailing-slash tolerance strips one
+  slash only.
+- Review lineage review-b96df8147ed044e9 (T3) remains open at
+  `targeted_validation_required` because of gentle-ai#4664; it gates nothing.
+
+## Next step
+Acceptance on the real machine still requires re-running `./install.sh` there
+(retires the old shim in `~/.local/bin`, installs the new tools), adding the
+hook line to the rc file, opening a new terminal, then: `gentle-ai upgrade`,
+`engram-doctor`, and `cd` between a work and a personal repository to watch
+`ENGRAM_DATA_DIR` switch. Push / PR remain the user's decision; the branch
+holds ~1,900 authored changed lines, above the ~400 slice budget, so the PR
+slicing strategy is to be asked once when a PR is requested.
