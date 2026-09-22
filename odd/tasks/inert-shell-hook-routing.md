@@ -236,7 +236,23 @@ exactly as they do today.
   24/24, 10/10, 42/42, 19/19, 29/29; `bash -n` on all scripts ok. Parent spot
   check re-ran the two changed test files: identical; README privacy scan
   clean (only a `/home/you/…` placeholder); read the new section and the
-  symlink branch. All four tasks checked off.
+  symlink branch. All four tasks checked off. Commit `0fa5d98`. RDD assess
+  (this commit only): high. Native review via canonical STATUS with `--agent`:
+  consent granted; lineage review-5b01b5b9baa5e088; four lenses admitted; the
+  final capture closed `correction_required` with one candidate-caused
+  CRITICAL finding (R4-symlinked-shim-left-active): the symlink branch just
+  added told the operator a symlinked shim "no hace falta tocarlo" while a
+  link to a marker file is still an active shim shadowing `engram`, and the
+  installer could never converge on it — a real defect that the T2 verifier's
+  note and my own readback had got wrong. Correction plan captured (50
+  lines); bounded correction committed as `fb41f74` (9+3 install.sh, 18+15
+  test; RED observed: "symlink to marker file is removed — still present";
+  GREEN 31/31; the message assertion was tightened to the actual removal text
+  because its first pattern also matched the old message). Targeted
+  validation admitted → `approved`; STATUS restart replayed the same
+  acknowledgement; exact acknowledgement run once →
+  `gentle-ai.review-acknowledged/v1`, `authority: burned`. This is the only
+  lineage of the feature that reached a terminal receipt.
 
 ## Follow-ups (recorded, not in scope)
 - Make `~/.engram` a cloud-less quarantine instance and move the personal
