@@ -385,6 +385,45 @@ assert_eq "F3c: ENGRAM_DATA_DIR unchanged" \
     "ENGRAM_DATA_DIR=$same_dir" "$(grep '^ENGRAM_DATA_DIR=' "$(env_file_for "$home_o" work)" 2>/dev/null)"
 assert_eq "F3c: no skip warning" "0" "$(grep -c 'sin tocar' <<<"$out_o")"
 
+# ===========================================================================
+# G1 — _instance_effective_data_dir must not depend on an ambient global
+# "name". A single `local a="$1" b="...$a..."` statement expands every RHS
+# in the OUTER scope before any of that statement's names become local, so
+# a "$a" reference inside the same statement never sees "$1" — it only
+# happened to work here because the one call site in main()'s final loop
+# always sets a GLOBAL "name" to the same value right before calling this
+# function. Both branches below call the function directly (via a sourced,
+# non-main()-running install.sh) with no such coincidence in play.
+# ===========================================================================
+echo
+echo "== G1: _instance_effective_data_dir does not depend on a stale/absent global \"name\" =="
+home_g="$(new_fixture_home home_g)"
+mkdir -p "$home_g/.config/engram-router/instances"
+printf 'ENGRAM_DATA_DIR=%s\nENGRAM_PORT=7437\n' "$home_g/custom/work-dir" > "$(env_file_for "$home_g" work)"
+printf 'ENGRAM_DATA_DIR=%s\nENGRAM_PORT=7438\n' "$home_g/custom/other-dir" > "$(env_file_for "$home_g" other)"
+
+echo "-- G1a: no matching global \"name\" is set at all (would crash under set -u if \$1 leaked) --"
+out_g1a="$(call_env_fn "$home_g" _instance_effective_data_dir work 2>&1)"
+rc_g1a=$?
+assert_eq "G1a: exits 0 (no 'unbound variable' crash)" "0" "$rc_g1a"
+assert_eq "G1a: returns work's own value with no ambient \$name" \
+    "$home_g/custom/work-dir" "$out_g1a"
+
+echo "-- G1b: a deliberately WRONG stale global \"name\" is set before the call --"
+out_g1b="$(
+    export HOME="$home_g"
+    export ENGRAM_ROUTER_BIN="$home_g/.local/bin"
+    export ENGRAM_ROUTER_LIB_DIR="$home_g/.local/lib/engram-router"
+    export ENGRAM_ROUTER_CONFIG_DIR="$home_g/.config/engram-router"
+    # shellcheck source=../install.sh
+    # shellcheck disable=SC1091
+    source "$ROOT_DIR/install.sh"
+    name="other"
+    _instance_effective_data_dir work
+)"
+assert_eq "G1b: still returns work's own value, ignoring the stale global \$name=other" \
+    "$home_g/custom/work-dir" "$out_g1b"
+
 echo
 echo "== real \$HOME is untouched =="
 REAL_HOME_AFTER="$(_real_home_snapshot)"

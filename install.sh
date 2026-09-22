@@ -561,7 +561,12 @@ write_instance_data_dir_env() {
 # now: NAME's env ENGRAM_DATA_DIR if present, else the unit's name-derived
 # default. Detects a repoint away from a directory that still holds data.
 _instance_effective_data_dir() {
-    local name="$1" env_file="$INSTANCES_ENV_DIR/$name.env" cur=""
+    # NOTE: bash expands every RHS in a single `local` statement in the
+    # OUTER scope before any of that statement's names become local, so a
+    # later assignment in the same statement must never reference an
+    # earlier one declared right there — split into two statements instead.
+    local name="$1"
+    local env_file="$INSTANCES_ENV_DIR/$name.env" cur=""
     [[ -r "$env_file" ]] && cur="$(sed -n 's/^ENGRAM_DATA_DIR=//p' "$env_file" | tail -n1)"
     printf '%s\n' "${cur:-$HOME/.local/share/engram-$name}"
 }
