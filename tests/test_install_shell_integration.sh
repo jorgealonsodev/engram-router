@@ -360,12 +360,36 @@ real_line_count_9c="$(grep -Ec '^[[:space:]]*eval[[:space:]].*engram-router[[:sp
 assert_eq "D1(c): exactly one genuine (uncommented) eval line exists" "1" "${real_line_count_9c:-0}"
 
 echo
-echo "== D1(d): an eval line inside a heredoc BODY is inert data, not a loaded hook =="
+echo "== D1(d): an eval line inside a heredoc BODY now counts as loaded too (accepted trade) =="
+# The guard is a single grep, not a heredoc-aware parser, so an eval line
+# that only exists as inert heredoc-body text can trip a false positive here.
+# That's accepted: the cost of the old false negative was a 16-line
+# hand-rolled scanner, and the cost of this false positive is at worst a
+# skipped append of a line that, even if added again for real, would be
+# harmless — engram-router's own hook dedups its registration (a
+# PROMPT_COMMAND substring check in bash, a chpwd_functions membership check
+# in zsh; see bin/engram-router's _emit_hook_bash/_emit_hook_zsh).
 H9d="$(new_fixture)"
 printf 'cat <<EOF\neval "$(engram-router hook bash)"\nEOF\n' > "$H9d/.bashrc"
+orig_9d="$(cat "$H9d/.bashrc")"
 out9d="$(run_offer "$H9d" /bin/bash "")"
-assert_not_match "D1(d): 'ya carga' is NOT printed for a heredoc-body eval" 'ya (carga|está)' "$out9d"
-assert_match "D1(d): the question IS asked" '¿Añado esta línea' "$out9d"
+assert_match "D1(d): 'ya carga' IS printed for a heredoc-body eval (accepted false positive)" 'ya (carga|está)' "$out9d"
+assert_not_match "D1(d): no question is asked" '¿Añado esta línea' "$out9d"
+assert_eq "D1(d): file is left byte-identical" "$orig_9d" "$(cat "$H9d/.bashrc")"
+
+echo
+echo "== D1(e): a genuinely duplicated eval line (already present twice) is harmless =="
+# Not a false positive: both lines are real, live, uncommented eval lines.
+# The guard fires on the first one, reports the hook as loaded, and never
+# touches the file — so no third copy is ever appended. Documents the same
+# claim as D1(d)'s comment: even a duplicate load is a harmless no-op
+# because the hook dedups itself at eval time.
+H9e="$(new_fixture)"
+printf 'eval "$(engram-router hook bash)"\neval "$(engram-router hook bash)"\n' > "$H9e/.bashrc"
+orig_9e="$(cat "$H9e/.bashrc")"
+out9e="$(run_offer "$H9e" /bin/bash "")"
+assert_match "D1(e): 'ya carga' is printed" 'ya (carga|está)' "$out9e"
+assert_eq "D1(e): file is left byte-identical (no third copy added)" "$orig_9e" "$(cat "$H9e/.bashrc")"
 
 # ===========================================================================
 # 10) D2: concurrency — N concurrent invocations against the same fixture

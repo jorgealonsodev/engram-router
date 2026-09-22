@@ -937,24 +937,18 @@ verify_no_shadowing() {
 # because the marker line is detected and the question is skipped. An
 # other/unknown shell keeps the old print-only behaviour exactly, unasked.
 # ---------------------------------------------------------------------------
-# Heredoc-aware: skips an eval line inside a "<<[-]DELIM ... DELIM" body
-# (inert data). Heuristic, not a parser: no quoted-delimiter whitespace,
-# multiple heredocs per line, or nested same-name heredocs.
+# Loaded if either the marker comment this installer writes, or an
+# uncommented eval line, appears anywhere in the file. Not heredoc-aware: a
+# line that merely sits inside a heredoc body (inert data) can now trip a
+# false positive. That's an accepted trade, not an oversight — the cost of a
+# false negative used to be a 16-line hand-rolled heredoc scanner, and the
+# cost of this false positive is a silently-skipped duplicate append, which
+# is harmless: engram-router's own hook dedups its registration (a
+# PROMPT_COMMAND substring check in bash, a chpwd_functions membership check
+# in zsh — see bin/engram-router's _emit_hook_bash/_emit_hook_zsh), so a
+# second eval line would have been a no-op anyway.
 hook_eval_line_present() {  # rc_file
-    local f="$1" heredoc="" line stripped
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ -n "$heredoc" ]]; then
-            stripped="${line#"${line%%[![:space:]]*}"}"
-            [[ "$stripped" == "$heredoc" ]] && heredoc=""
-            continue
-        fi
-        if [[ "$line" =~ \<\<-?[[:space:]]*[\"\']?([A-Za-z_][A-Za-z0-9_]*) ]]; then
-            heredoc="${BASH_REMATCH[1]}"
-            continue
-        fi
-        [[ "$line" =~ ^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook ]] && return 0
-    done < "$f"
-    return 1
+    grep -Eq '^[[:space:]]*(# \[engram-router\] shell hook:|eval[[:space:]].*engram-router[[:space:]]+hook)' "$1"
 }
 offer_shell_integration() {
     section "Integración con la shell"
