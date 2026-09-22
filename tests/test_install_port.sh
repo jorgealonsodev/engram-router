@@ -122,6 +122,19 @@ else
 fi
 
 echo
+echo "== <instance>.env carries ENGRAM_DATA_DIR=<the fixture instance's absolute data dir> =="
+expected_data_dir="$FIXTURE/home/.local/share/engram-work"
+if [[ -r "$env_file" ]]; then
+    assert_eq "work.env has exactly one ENGRAM_DATA_DIR= line" "1" \
+        "$(grep -c '^ENGRAM_DATA_DIR=' "$env_file" 2>/dev/null)"
+    assert_eq "work.env's ENGRAM_DATA_DIR= line matches the fixture instance dir" \
+        "ENGRAM_DATA_DIR=$expected_data_dir" \
+        "$(grep '^ENGRAM_DATA_DIR=' "$env_file" 2>/dev/null)"
+else
+    _fail "work.env exists" "$env_file not found"
+fi
+
+echo
 echo "== re-running install.sh keeps the existing port (stability across re-runs) =="
 run2_out="$(run_install "$FIXTURE/home" </dev/null 2>&1)"
 instance_line2="$(grep -F '"work"' "$CONFIG_FILE" 2>/dev/null | head -1)"
@@ -129,6 +142,11 @@ port2="$(printf '%s' "$instance_line2" | sed -n 's/.*"port"[[:space:]]*:[[:space
 assert_eq "the port is unchanged after a re-run" "$port1" "$port2"
 assert_match "'se conserva la configuración existente' seen on the non-interactive re-run" \
     'conserva la configuración existente' "$run2_out"
+assert_eq "work.env still has exactly one ENGRAM_DATA_DIR= line after the re-run" "1" \
+    "$(grep -c '^ENGRAM_DATA_DIR=' "$env_file" 2>/dev/null)"
+assert_eq "work.env's ENGRAM_DATA_DIR= line is unchanged after the re-run" \
+    "ENGRAM_DATA_DIR=$expected_data_dir" \
+    "$(grep '^ENGRAM_DATA_DIR=' "$env_file" 2>/dev/null)"
 
 echo
 echo "== a deliberately-created port clash is reported by engram-doctor =="

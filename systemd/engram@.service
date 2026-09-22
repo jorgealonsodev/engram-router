@@ -10,6 +10,14 @@ Type=simple
 # database, .instance-id, and cloud.json from every other instance
 # (verified: a second daemon with its own data dir created its own
 # engram.db and never touched the main database).
+#
+# The line below is only a fallback for env files written by older installs
+# that predate install.sh writing ENGRAM_DATA_DIR itself; it derives the
+# path from the instance NAME (%i), which need not match router.json's
+# actual data_dir for this instance (e.g. a reused or non-default path).
+# The per-instance EnvironmentFile below is authoritative: install.sh writes
+# ENGRAM_DATA_DIR there from router.json, and it overrides this fallback
+# because EnvironmentFile is read after Environment=.
 Environment=ENGRAM_DATA_DIR=%h/.local/share/engram-%i
 EnvironmentFile=-%h/.config/engram-router/instances/%i.env
 # ENGRAM_PORT is a positional argument to `engram serve`, not an env var the

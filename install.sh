@@ -484,6 +484,32 @@ write_instance_port_env() {
     fi
 }
 
+# Writes/updates ENGRAM_DATA_DIR=<dir> in <instance>.env, preserving every
+# other line. Runs for every instance on every install, not only newly
+# provisioned ones, the same way write_instance_port_env does for ENGRAM_PORT.
+#
+# The systemd unit's own Environment= line derives the data dir from the
+# instance NAME (%i), which only matches by coincidence: an instance whose
+# router.json data_dir lives elsewhere (renamed, reused from an older
+# install, or pointed at a non-default path) would otherwise be served from
+# the wrong, silently-created directory. EnvironmentFile= is read after
+# Environment= and overrides it, so writing the real path here is what makes
+# the daemon serve the data_dir router.json actually points at.
+write_instance_data_dir_env() {
+    local name="$1" dir="$2"
+    local env_file="$INSTANCES_ENV_DIR/$name.env"
+    mkdir -p "$INSTANCES_ENV_DIR"
+    [[ -e "$env_file" ]] || : > "$env_file"
+    if grep -q '^ENGRAM_DATA_DIR=' "$env_file" 2>/dev/null; then
+        local tmp
+        tmp="$(mktemp "$INSTANCES_ENV_DIR/.datadir.XXXXXX")"
+        sed "s|^ENGRAM_DATA_DIR=.*|ENGRAM_DATA_DIR=$dir|" "$env_file" > "$tmp"
+        mv "$tmp" "$env_file"
+    else
+        printf 'ENGRAM_DATA_DIR=%s\n' "$dir" >> "$env_file"
+    fi
+}
+
 read_new_name() {
     local prompt="$1" name=""
     while :; do
@@ -989,11 +1015,14 @@ main() {
 
     write_router_config
 
-    # Every instance's port lands in its env file every run, not only newly
-    # touched ones: this is what keeps an instance stable across a re-run
-    # that only just gave it a port in router.json.
+    # Every instance's port and data dir land in its env file every run, not
+    # only newly touched ones: this is what keeps an instance stable across a
+    # re-run that only just gave it a port in router.json, and what keeps the
+    # daemon serving the data_dir router.json actually points at rather than
+    # the one the systemd unit's Environment= line derives from the name.
     for idx in "${!INSTANCES_TO_PROVISION[@]}"; do
         write_instance_port_env "${INSTANCES_TO_PROVISION[$idx]}" "${INSTANCE_PORTS[$idx]}"
+        write_instance_data_dir_env "${INSTANCES_TO_PROVISION[$idx]}" "${INSTANCE_DIRS[$idx]}"
     done
 
     section "Aviso final"
