@@ -163,8 +163,12 @@ new_case() {
     : > "$LOG_FILE"
 
     # Single line per instance: this is the exact shape install.sh's
-    # write_router_config() emits (see instance_lines+= in install.sh),
-    # which is what instance_data_dir()'s line-based sed depends on.
+    # write_router_config() emits (see instance_lines+= in install.sh).
+    # instance_data_dir() now resolves this through lib/router.sh's shared
+    # parser (see tests/test_migrate_data_dir.sh), which also handles a
+    # pretty-printed, multi-line router.json — this file's single-line shape
+    # is no longer a parsing requirement, just what install.sh happens to
+    # write today.
     cat > "$CONFIG_DIR/router.json" <<EOF
 {
   "rules": [],

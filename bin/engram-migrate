@@ -71,25 +71,37 @@ done
 # than guess: with three instances "the other one" is not a single answer, and
 # guessing wrong would migrate from an empty instance, count 0 against 0 and
 # report success — the silent failure this tool exists to prevent.
-# Uses the shared parser rather than a sed of its own. A hand-rolled one
-# returned a single name from a router.json written on one line — greedy
-# matching kept only the last instance — and the caller then treated it as
-# "the only other instance" and picked it. Silently choosing a source is the
-# failure this inference exists to avoid, so it must not be introduced here.
+#
+# Both that inference and instance_data_dir() below need router.json parsed,
+# so the shared library is loaded exactly once, here, rather than each of
+# them re-implementing config parsing with sed of its own. A hand-rolled sed
+# once returned a single name from a router.json written on one line —
+# greedy matching kept only the last instance — and the caller then treated
+# it as "the only other instance" and picked it. Silently choosing a source
+# is the failure this inference exists to avoid, so it must not be
+# reintroduced here. instance_data_dir()'s own former sed had the same
+# one-line-only limitation for "data_dir", plus a separate $HOME/~ expansion
+# sed whose delimiter (#) breaks outright if $HOME itself contains one.
+# router.sh's router_load_config/router_expand_path have neither problem.
+ROUTER_LIB_LOADED=0
+ROUTER_CONFIG_LOADED=0
+for _router_lib in "$ENGRAM_ROUTER_LIB_DIR/router.sh" "$HOME/.local/lib/engram-router/router.sh" \
+                    "$SCRIPT_SELF_DIR/../lib/router.sh"; do
+    [[ -r "$_router_lib" ]] || continue
+    # shellcheck source=/dev/null
+    source "$_router_lib"
+    ROUTER_LIB_LOADED=1
+    break
+done
+unset _router_lib
+
+if [[ $ROUTER_LIB_LOADED -eq 1 && -r "$CONFIG_FILE" ]]; then
+    router_load_config "$CONFIG_FILE" 2>/dev/null && ROUTER_CONFIG_LOADED=1
+fi
+
 list_instances() {
-    [[ -r "$CONFIG_FILE" ]] || return 1
-    local lib
-    for lib in "$ENGRAM_ROUTER_LIB_DIR/router.sh" "$HOME/.local/lib/engram-router/router.sh" \
-               "$SCRIPT_SELF_DIR/../lib/router.sh"; do
-        [[ -r "$lib" ]] || continue
-        # shellcheck source=/dev/null
-        source "$lib"
-        INSTANCE_NAMES=()
-        router_load_config "$CONFIG_FILE" 2>/dev/null || return 1
-        printf '%s\n' ${INSTANCE_NAMES[@]+"${INSTANCE_NAMES[@]}"}
-        return 0
-    done
-    return 1
+    [[ $ROUTER_CONFIG_LOADED -eq 1 ]] || return 1
+    printf '%s\n' ${INSTANCE_NAMES[@]+"${INSTANCE_NAMES[@]}"}
 }
 
 if [[ -z "$TO" ]]; then
@@ -169,12 +181,36 @@ resolve_real_engram() {
 REAL_ENGRAM="$(resolve_real_engram || true)"
 [[ -n "$REAL_ENGRAM" ]] || die "no se encuentra el binario real de engram."
 
-# Instance data dirs come from router.json; both must be configured.
+# Instance data dirs come from router.json; both must be configured. Uses
+# the shared library's parser and its router_expand_path (loaded once above
+# into ROUTER_CONFIG_LOADED / INSTANCE_DATA_DIR) instead of re-parsing
+# router.json and re-expanding $HOME/~ with sed of its own — see the note
+# above list_instances() for what that duplication used to break. Falls back
+# to a line-based parse only when the shared library itself could not be
+# found at all (a broken install, not a normal run); even then the $HOME/~
+# expansion is plain bash parameter expansion, matching router_expand_path's
+# own logic, never a sed substitution — a sed delimiter is exactly what broke
+# here before.
 instance_data_dir() {
     local name="$1"
+    if [[ $ROUTER_CONFIG_LOADED -eq 1 ]]; then
+        local dir="${INSTANCE_DATA_DIR[$name]:-}"
+        [[ -n "$dir" ]] || return 1
+        router_expand_path "$dir"
+        return 0
+    fi
+
     [[ -r "$CONFIG_FILE" ]] || return 1
-    sed -n "s/.*\"$name\"[[:space:]]*:[[:space:]]*{[^}]*\"data_dir\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" |
-        head -1 | sed "s#^\$HOME#$HOME#; s#^~#$HOME#"
+    local raw
+    raw="$(sed -n "s/.*\"$name\"[[:space:]]*:[[:space:]]*{[^}]*\"data_dir\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" | head -1)"
+    [[ -n "$raw" ]] || return 1
+    # shellcheck disable=SC2016,SC2088
+    case "$raw" in
+        '$HOME'/*) raw="${HOME}${raw#\$HOME}" ;;
+        '~/'*) raw="${HOME}/${raw#\~/}" ;;
+        '~') raw="${HOME}" ;;
+    esac
+    printf '%s\n' "$raw"
 }
 
 FROM_DIR="$(instance_data_dir "$FROM" || true)"
