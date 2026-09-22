@@ -5,7 +5,10 @@
 # language contract. Code/comments stay in English.
 #
 # Safe to re-run (idempotent): existing cloud.json / router.json content is
-# never silently overwritten, and no dotfile is ever edited automatically.
+# never silently overwritten. Dotfiles are never edited without an explicit
+# "yes" to the shell-integration question; even then, only the rc file that
+# matches $SHELL is touched, and only to append one marker-tagged eval line
+# behind a timestamped backup.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1020,12 +1023,29 @@ verify_no_shadowing() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7 — print the shell-hook line for the user's shell. install.sh never
-# edits dotfiles (see the header comment), so the line is printed for the
-# person to add by hand, chosen from $SHELL when it names a known shell and
-# both otherwise.
+# Step 7 — print the shell-hook line for the user's shell and, only for a
+# known shell ($SHELL basename is bash or zsh), offer to add it. This is the
+# one exception to "install.sh never edits dotfiles": it edits at most one
+# rc file, and only after an explicit "yes" to this one question (default
+# No). On yes, it takes a timestamped backup of the rc file (if it exists)
+# and appends exactly one marker-tagged eval line; re-running is idempotent
+# because the marker line is detected and the question is skipped. An
+# other/unknown shell keeps the old print-only behaviour exactly, unasked.
 # ---------------------------------------------------------------------------
-print_hook_instructions() {
+# Loaded if either the marker comment this installer writes, or an
+# uncommented eval line, appears anywhere in the file. Not heredoc-aware: a
+# line that merely sits inside a heredoc body (inert data) can now trip a
+# false positive. That's an accepted trade, not an oversight — the cost of a
+# false negative used to be a 16-line hand-rolled heredoc scanner, and the
+# cost of this false positive is a silently-skipped duplicate append, which
+# is harmless: engram-router's own hook dedups its registration (a
+# PROMPT_COMMAND substring check in bash, a chpwd_functions membership check
+# in zsh — see bin/engram-router's _emit_hook_bash/_emit_hook_zsh), so a
+# second eval line would have been a no-op anyway.
+hook_eval_line_present() {  # rc_file
+    grep -Eq '^[[:space:]]*(# \[engram-router\] shell hook:|eval[[:space:]].*engram-router[[:space:]]+hook)' "$1"
+}
+offer_shell_integration() {
     section "Integración con la shell"
     say "El enrutado ya no depende de ningún binario en PATH: ahora lo hace un"
     say "hook de shell que exporta ENGRAM_DATA_DIR según el directorio actual,"
@@ -1035,22 +1055,127 @@ print_hook_instructions() {
     local shell_name
     shell_name="$(basename "${SHELL:-}")"
 
+    local rc_file="" hook_shell="" display_rc=""
     case "$shell_name" in
-        bash)
-            say "Añada esta línea a ~/.bashrc:"
-            say "  eval \"\$(engram-router hook bash)\""
-            ;;
-        zsh)
-            say "Añada esta línea a ~/.zshrc:"
-            say "  eval \"\$(engram-router hook zsh)\""
+        bash) rc_file="$HOME/.bashrc"; hook_shell="bash"; display_rc="~/.bashrc" ;;
+        zsh)  rc_file="$HOME/.zshrc";  hook_shell="zsh";  display_rc="~/.zshrc" ;;
+    esac
+
+    if [[ -z "$hook_shell" ]]; then
+        say "No se ha reconocido \$SHELL (${SHELL:-sin definir}). Añada la línea"
+        say "que corresponda a su shell:"
+        say "  bash (~/.bashrc): eval \"\$(engram-router hook bash)\""
+        say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
+        say ""
+        say "Después, abra una terminal nueva y ejecute: engram-doctor"
+        return 0
+    fi
+
+    # Serialize the whole read-decide-write sequence (idempotency check
+    # through the final "mv" below) with an flock held on the rc file's
+    # directory, so two concurrent installs can't both see a pristine file
+    # and both append the block. We lock the *directory*, not a sibling
+    # lock file, so there is nothing to leak or clean up afterwards.
+    # flock may be missing on a minimal system: degrade to unlocked,
+    # best-effort behaviour rather than refusing to run — a lock failure
+    # must never abort the installer under set -e.
+    local lock_dir lock_fd=""
+    lock_dir="$(dirname -- "$rc_file")"
+    if command -v flock >/dev/null 2>&1; then
+        if exec {lock_fd}<"$lock_dir" 2>/dev/null; then
+            flock "$lock_fd" 2>/dev/null || true
+        else
+            lock_fd=""
+        fi
+    fi
+
+    # Anchored to an actually-loaded hook: an uncommented line that evaluates
+    # it. A bare substring match (e.g. a comment that merely mentions
+    # "engram-router hook") used to short-circuit this whole function and
+    # silently skip real integration. A commented-out eval line (# eval
+    # "$(engram-router hook bash)") does nothing at shell start-up, so it
+    # deliberately does NOT count as loaded either — the anchor requires
+    # "eval" right after optional leading whitespace, never after "#".
+    if [[ -f "$rc_file" ]] && hook_eval_line_present "$rc_file" 2>/dev/null; then
+        say "$display_rc ya carga el hook de engram-router; no hace falta nada más."
+        # Explicit 0: an empty lock_fd (e.g. flock missing) makes the guard
+        # below false (status 1); a bare "return" would leak that as ours.
+        [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
+        return 0
+    fi
+
+    say "Añada esta línea a $display_rc:"
+    say "  eval \"\$(engram-router hook $hook_shell)\""
+    say ""
+
+    # printf (not "read -p") so the question is visible even when stdin is
+    # not a terminal (e.g. piped or /dev/null in tests and non-interactive
+    # runs) — bash only shows a "read -p" prompt on an actual tty.
+    printf '¿Añado esta línea a %s ahora? [s/N]: ' "$display_rc"
+    local answer=""
+    read -r answer || answer=""
+
+    case "$answer" in
+        s|S|si|Si|SI|sí|Sí|SÍ|y|Y|yes|Yes|YES)
+            # Atomic (temp file + same-dir mv) and non-fatal: every risky
+            # command stays left of "||", so set -e never aborts install.sh.
+            # If $rc_file is a symlink (Nix/home-manager/chezmoi/stow layouts
+            # all manage dotfiles this way), resolve it and write through to
+            # the real target's own directory, so "mv" never replaces the
+            # symlink itself with a plain file.
+            local write_file="$rc_file" ok=1
+            if [[ -L "$rc_file" ]]; then
+                write_file="$(readlink -f -- "$rc_file" 2>/dev/null)" || write_file=""
+                [[ -z "$write_file" ]] && ok=0
+            fi
+            local rc_existed=0
+            [[ $ok -eq 1 && -e "$write_file" ]] && rc_existed=1
+            local backup="" tmp=""
+            if [[ $ok -eq 1 && $rc_existed -eq 1 ]]; then
+                # PID-suffixed on top of the timestamp: the flock above
+                # already serializes same-second concurrent writers, but the
+                # suffix keeps the backup name collision-proof even when
+                # flock is unavailable and we degraded to unlocked above.
+                backup="${write_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)-$$"
+                if cp -p "$write_file" "$backup"; then say "Copia de seguridad del archivo original: $backup"
+                else backup=""; ok=0; fi
+            fi
+            [[ $ok -eq 1 ]] && { tmp="$(mktemp "${write_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
+            # Guarded separately: "{ cat; printf; } > tmp" reports only the
+            # last command's status, masking a failing cat behind printf's ok.
+            [[ $ok -eq 1 && $rc_existed -eq 1 ]] && { cat "$write_file" >> "$tmp" || ok=0; }
+            [[ $ok -eq 1 ]] && { printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell" >> "$tmp" || ok=0; }
+            if [[ $ok -eq 1 ]]; then
+                if [[ $rc_existed -eq 1 ]]; then
+                    # --reference is GNU-only (missing on BusyBox/toybox/BSD
+                    # chmod); a bare failure would abort under set -e, so
+                    # fall back to "stat" (GNU/BSD) and degrade silently.
+                    if ! chmod --reference="$write_file" "$tmp" 2>/dev/null; then
+                        local orig_mode=""
+                        orig_mode="$(stat -c '%a' "$write_file" 2>/dev/null || stat -f '%Lp' "$write_file" 2>/dev/null || true)"
+                        [[ -n "$orig_mode" ]] && chmod "$orig_mode" "$tmp" 2>/dev/null || true
+                    fi
+                else
+                    # mktemp leaves the temp file at 0600; a freshly created
+                    # rc file should get the sane default (0644) a shell
+                    # would normally create, not a locked-down mode.
+                    chmod 0644 "$tmp" 2>/dev/null || true
+                fi
+                mv "$tmp" "$write_file" || ok=0
+            fi
+            if [[ $ok -eq 1 ]]; then say "Añadida la línea a $display_rc."
+            else
+                rm -f "$tmp"
+                say "No se pudo añadir la línea automáticamente a $display_rc; añádala a mano:"
+                say "  eval \"\$(engram-router hook $hook_shell)\""
+            fi
             ;;
         *)
-            say "No se ha reconocido \$SHELL (${SHELL:-sin definir}). Añada la línea"
-            say "que corresponda a su shell:"
-            say "  bash (~/.bashrc): eval \"\$(engram-router hook bash)\""
-            say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
+            : # nothing to do; the line above already tells them what to add
             ;;
     esac
+
+    [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
 
     say ""
     say "Después, abra una terminal nueva y ejecute: engram-doctor"
@@ -1143,7 +1268,7 @@ main() {
     local shadow_ok=1
     verify_no_shadowing || shadow_ok=0
 
-    print_hook_instructions
+    offer_shell_integration
 
     section "Ejecutando engram-doctor"
     "$PREFIX_BIN/engram-doctor" || true
