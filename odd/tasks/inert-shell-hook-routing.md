@@ -272,3 +272,15 @@ hook line to the rc file, opening a new terminal, then: `gentle-ai upgrade`,
 `ENGRAM_DATA_DIR` switch. Push / PR remain the user's decision; the branch
 holds ~1,900 authored changed lines, above the ~400 slice budget, so the PR
 slicing strategy is to be asked once when a PR is requested.
+
+## Delivery
+Strategy chosen by the user (asked once, `ask-on-risk`): a single PR with a
+`size:exception`. One honest slicing pass gave hook 676 · shim retirement +
+symlink 622 · doctor + correction 480 · docs 266 changed lines; three of four
+slices stay above 400 because tests belong with the code they verify, and
+they depend on each other in order. The seven commits remain the reviewable
+units. Outgoing diff privacy-scanned (no hostnames, tokens or private
+names); `shellcheck` shows no new warnings beyond four intentional SC2016
+notes on the printed `eval` lines. Acceptance re-verified on the maintainer's
+machine before the PR (shim retired, gentle-ai upgraded 3.4.0 → 3.5.0, doctor
+healthy, hook routes trabajo/personal/unmatched as specified).
