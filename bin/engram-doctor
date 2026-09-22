@@ -160,14 +160,13 @@ check_no_shadowing() {
 
 # ---------------------------------------------------------------------------
 # Shared with check_current_repo_routing: resolve routing for the current
-# directory (its git toplevel, or $PWD outside a repo) and leave the
-# ROUTER_* globals from lib/router.sh populated for the caller to read.
+# directory (its git toplevel, or $PWD outside a repo), leave the ROUTER_*
+# globals populated for the caller, and set CURRENT_REPO_DIR — never print
+# it, which would subshell the call and drop every ROUTER_* assignment.
 # ---------------------------------------------------------------------------
 _resolve_current_dir_routing() {
-    local repo_dir
-    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    router_resolve "$repo_dir" "$ROUTER_CONFIG" || true
-    printf '%s\n' "$repo_dir"
+    CURRENT_REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    router_resolve "$CURRENT_REPO_DIR" "$ROUTER_CONFIG" || true
 }
 
 # Prints the eval line(s) the user should add to their shell rc file,
@@ -196,7 +195,7 @@ _print_hook_eval_line() {
 # ---------------------------------------------------------------------------
 check_hook_active() {
     echo "== Hook de shell activo en este directorio =="
-    _resolve_current_dir_routing >/dev/null
+    _resolve_current_dir_routing
 
     local resolved_dir="" env_dir=""
     [[ -n "$ROUTER_INSTANCE" ]] && resolved_dir="${ROUTER_DATA_DIR%/}"
@@ -388,10 +387,9 @@ check_port_conflicts() {
 # ---------------------------------------------------------------------------
 check_current_repo_routing() {
     echo "== Enrutamiento del repositorio actual =="
-    local repo_dir
-    repo_dir="$(_resolve_current_dir_routing)"
+    _resolve_current_dir_routing
 
-    printf '  repo:      %s\n' "$(basename "$repo_dir")"
+    printf '  repo:      %s\n' "$(basename "$CURRENT_REPO_DIR")"
     printf '  remote:    %s\n' "${ROUTER_NORMALIZED:-${ROUTER_REMOTE:-"(sin remoto)"}}"
     printf '  regla:     %s\n' "${ROUTER_MATCHED_RULE:-ninguna}"
 
@@ -448,4 +446,8 @@ main() {
     [[ $FAILURES -eq 0 ]]
 }
 
-main "$@"
+# Guarded so tests can source this file to reach individual functions (e.g.
+# check_current_repo_routing) without running the interactive main().
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

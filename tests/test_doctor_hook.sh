@@ -247,6 +247,42 @@ assert_eq "doctor exits 0 for a stale ENGRAM_DATA_DIR (warning, not a failure)" 
     "0" "$DOC_RC"
 
 # ===========================================================================
+# check_current_repo_routing — regression for the subshell dropping the
+# ROUTER_* globals set inside _resolve_current_dir_routing's command
+# substitution (R2-subshell-global-contract / R4-subshell-drops-router-globals).
+# ===========================================================================
+echo
+echo "== check_current_repo_routing: full doctor run names the resolved instance =="
+_run_doctor "$WORK_REPO" "$WITH_REAL_PATH" "$TRABAJO_DATA_DIR"
+assert_match "'Enrutamiento del repositorio actual' section names the resolved instance" \
+    "instancia resuelta: trabajo" "$(cat "$DOC_OUT")"
+
+echo
+echo "== check_current_repo_routing: called alone after a global reset =="
+ALONE_OUT="$(mktemp -p "$FIXTURE")"
+(
+    for v in $(compgen -e | grep '^ENGRAM_CLOUD_' || true); do unset "$v"; done
+    cd "$WORK_REPO" || exit 90
+    export HOME="$FIXTURE_HOME"
+    export ENGRAM_ROUTER_CONFIG="$CONFIG_FILE"
+    export ENGRAM_ROUTER_LIB="$ROOT_DIR/lib/router.sh"
+    export PATH="$WITH_REAL_PATH"
+    unset ENGRAM_DATA_DIR
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/bin/engram-doctor" >/dev/null 2>&1
+    # main() is guarded and does not run under source, so lib/router.sh (the
+    # source of router_resolve) never got sourced above; do what main() does.
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/lib/router.sh"
+    ROUTER_INSTANCE=
+    ROUTER_DATA_DIR=
+    ROUTER_MATCHED_RULE=
+    check_current_repo_routing
+) >"$ALONE_OUT" 2>&1
+assert_match "check_current_repo_routing alone still resolves the instance (not stale/blank)" \
+    "instancia resuelta: trabajo" "$(cat "$ALONE_OUT")"
+
+# ===========================================================================
 # Recommended eval line matches $SHELL.
 # ===========================================================================
 echo
