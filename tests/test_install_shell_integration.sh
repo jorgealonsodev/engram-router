@@ -428,6 +428,49 @@ else
 fi
 
 # ===========================================================================
+# 12) A: the already-integrated exit must not leak the lock-fd guard's
+#     status; return 0 so a missing flock never aborts a re-run.
+# ===========================================================================
+echo
+echo "== A: already-integrated exit survives with no flock on PATH =="
+Hf="$(new_fixture)"
+printf 'eval "$(engram-router hook bash)"\n' > "$Hf/.bashrc"
+bindir_noflock="$(mktemp -d)"; FIXTURES+=("$bindir_noflock")
+for tool in basename dirname grep; do t="$(command -v "$tool" 2>/dev/null)" && ln -s "$t" "$bindir_noflock/$tool"; done
+outF="$(export HOME="$Hf" SHELL=/bin/bash PATH="$bindir_noflock"
+    source "$ROOT_DIR/install.sh" 2>/dev/null
+    offer_shell_integration </dev/null
+    printf 'SURVIVED=%d\n' "$?")"
+assert_match "A: 'ya carga' is still printed with no flock" 'ya (carga|está)' "$outF"
+assert_match "A: function returns 0, caller under set -e survives" 'SURVIVED=0' "$outF"
+
+# ===========================================================================
+# 13) B: an unguarded "chmod --reference" must not abort the write when
+#     that flag is unsupported (BusyBox/toybox/BSD chmod).
+# ===========================================================================
+echo
+echo "== B: chmod --reference failing does not abort the write =="
+Hg="$(new_fixture)"
+printf '# existing\nexport FOO=bar\n' > "$Hg/.bashrc"
+real_chmod="$(command -v chmod)"
+bindir_chmod="$(mktemp -d)"; FIXTURES+=("$bindir_chmod")
+cat > "$bindir_chmod/chmod" <<EOF
+#!/usr/bin/env bash
+case " \$* " in *' --reference='*) exit 1 ;; esac
+exec "$real_chmod" "\$@"
+EOF
+chmod +x "$bindir_chmod/chmod"
+outG="$(export HOME="$Hg" SHELL=/bin/bash PATH="$bindir_chmod:$PATH"
+    source "$ROOT_DIR/install.sh" 2>/dev/null
+    printf 's\n' | offer_shell_integration
+    printf 'SURVIVED=%d\n' "$?")"
+assert_match "B: caller under set -e survives a failing chmod --reference" 'SURVIVED=0' "$outG"
+assert_match "B: output still says the line was added" 'Añadid' "$outG"
+marker_count_g="$(grep -c 'engram-router hook bash' "$Hg/.bashrc" 2>/dev/null || true)"
+assert_eq "B: marker/eval line was written despite chmod --reference failing" "1" "${marker_count_g:-0}"
+assert_eq "B: no leftover *.engram-router.* temp file" "" "$(find "$Hg" -maxdepth 1 -name '*.engram-router.*' 2>/dev/null)"
+
+# ===========================================================================
 # 8) real $HOME is untouched.
 # ===========================================================================
 echo

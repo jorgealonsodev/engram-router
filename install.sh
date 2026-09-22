@@ -960,7 +960,7 @@ offer_shell_integration() {
         say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
         say ""
         say "Después, abra una terminal nueva y ejecute: engram-doctor"
-        return
+        return 0
     fi
 
     # Serialize the whole read-decide-write sequence (idempotency check
@@ -990,8 +990,10 @@ offer_shell_integration() {
     # "eval" right after optional leading whitespace, never after "#".
     if [[ -f "$rc_file" ]] && grep -Eq '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$rc_file" 2>/dev/null; then
         say "$display_rc ya carga el hook de engram-router; no hace falta nada más."
+        # Explicit 0: an empty lock_fd (e.g. flock missing) makes the guard
+        # below false (status 1); a bare "return" would leak that as ours.
         [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
-        return
+        return 0
     fi
 
     say "Añada esta línea a $display_rc:"
@@ -1034,12 +1036,19 @@ offer_shell_integration() {
             [[ $ok -eq 1 ]] && { { [[ $rc_existed -eq 1 ]] && cat "$write_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
             if [[ $ok -eq 1 ]]; then
                 if [[ $rc_existed -eq 1 ]]; then
-                    chmod --reference="$write_file" "$tmp" 2>/dev/null
+                    # --reference is GNU-only (missing on BusyBox/toybox/BSD
+                    # chmod); a bare failure would abort under set -e, so
+                    # fall back to "stat" (GNU/BSD) and degrade silently.
+                    if ! chmod --reference="$write_file" "$tmp" 2>/dev/null; then
+                        local orig_mode=""
+                        orig_mode="$(stat -c '%a' "$write_file" 2>/dev/null || stat -f '%Lp' "$write_file" 2>/dev/null || true)"
+                        [[ -n "$orig_mode" ]] && chmod "$orig_mode" "$tmp" 2>/dev/null || true
+                    fi
                 else
                     # mktemp leaves the temp file at 0600; a freshly created
                     # rc file should get the sane default (0644) a shell
                     # would normally create, not a locked-down mode.
-                    chmod 0644 "$tmp" 2>/dev/null
+                    chmod 0644 "$tmp" 2>/dev/null || true
                 fi
                 mv "$tmp" "$write_file" || ok=0
             fi
