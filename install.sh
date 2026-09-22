@@ -981,19 +981,22 @@ offer_shell_integration() {
 
     case "$answer" in
         s|S|si|Si|SI|sí|Sí|SÍ|y|Y|yes|Yes|YES)
-            local backup=""
+            # Atomic (temp file + same-dir mv) and non-fatal: every risky
+            # command stays left of "||", so set -e never aborts install.sh.
+            local backup="" tmp="" ok=1
             if [[ -e "$rc_file" ]]; then
                 backup="${rc_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)"
-                cp -p "$rc_file" "$backup"
+                if cp -p "$rc_file" "$backup"; then say "Copia de seguridad del archivo original: $backup"
+                else backup=""; ok=0; fi
             fi
-            {
-                printf '\n'
-                printf '# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\n'
-                printf 'eval "$(engram-router hook %s)"\n' "$hook_shell"
-            } >> "$rc_file"
-            say "Añadida la línea a $display_rc."
-            if [[ -n "$backup" ]]; then
-                say "Copia de seguridad del archivo original: $backup"
+            [[ $ok -eq 1 ]] && { tmp="$(mktemp "${rc_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
+            [[ $ok -eq 1 ]] && { { [[ -e "$rc_file" ]] && cat "$rc_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
+            [[ $ok -eq 1 ]] && { [[ -e "$rc_file" ]] && chmod --reference="$rc_file" "$tmp" 2>/dev/null; mv "$tmp" "$rc_file" || ok=0; }
+            if [[ $ok -eq 1 ]]; then say "Añadida la línea a $display_rc."
+            else
+                rm -f "$tmp"
+                say "No se pudo añadir la línea automáticamente a $display_rc; añádala a mano:"
+                say "  eval \"\$(engram-router hook $hook_shell)\""
             fi
             ;;
         *)

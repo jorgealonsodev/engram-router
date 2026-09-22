@@ -127,8 +127,12 @@ echo
 echo "== answer 's' with an existing ~/.bashrc =="
 H3="$(new_fixture)"
 printf '# my existing bashrc\nexport FOO=bar\n' > "$H3/.bashrc"
+chmod 0640 "$H3/.bashrc"
+mode_before="$(stat -c %a "$H3/.bashrc")"
 orig_content="$(cat "$H3/.bashrc")"
 out3="$(run_offer "$H3" /bin/bash "s")"
+assert_eq "mode is preserved (atomic mv keeps it sane)" "$mode_before" "$(stat -c %a "$H3/.bashrc" 2>/dev/null)"
+assert_eq "no leftover *.engram-router.* temp file" "" "$(find "$H3" -maxdepth 1 -name '*.engram-router.*' 2>/dev/null)"
 
 new_content="$(cat "$H3/.bashrc" 2>/dev/null || true)"
 if [[ "$new_content" == "$orig_content"* ]]; then
@@ -210,6 +214,24 @@ if [[ -e "$H7/.bashrc" || -e "$H7/.zshrc" ]]; then
 else
     _pass "unknown shell: nothing is written"
 fi
+
+# ===========================================================================
+# 7b) Unwritable rc dir (mktemp/mv fail): non-fatal degrade, no truncation,
+#     no leftover temp file, and the running shell survives under set -e.
+# ===========================================================================
+echo
+echo "== answer 's' with an unwritable rc directory: non-fatal degrade =="
+H9="$(new_fixture)"
+printf 'export FOO=bar\n' > "$H9/.bashrc"
+chmod 0444 "$H9/.bashrc"; chmod 0555 "$H9"
+out9="$(export HOME="$H9" SHELL=/bin/bash
+    source "$ROOT_DIR/install.sh" 2>/dev/null
+    printf 's\n' | offer_shell_integration; printf 'SURVIVED=%d\n' "$?")"
+chmod 0755 "$H9"
+assert_match "unwritable dir: survives (non-fatal under set -e)" 'SURVIVED=0' "$out9"
+assert_match "unwritable dir: Spanish failure message shown" 'No se pudo añadir' "$out9"
+assert_eq "unwritable dir: rc file left byte-identical" "export FOO=bar" "$(cat "$H9/.bashrc")"
+assert_eq "unwritable dir: no leftover temp file" "" "$(find "$H9" -maxdepth 1 -name '*.engram-router.*' 2>/dev/null)"
 
 # ===========================================================================
 # 8) real $HOME is untouched.
