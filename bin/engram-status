@@ -1,0 +1,583 @@
+#!/usr/bin/env bash
+# bin/engram-status — read-only sync-state report for every configured
+# Engram instance: cloud destination, daemon liveness, autosync setting, and
+# the sync_state/sync_enrolled_projects/sync_mutations facts that
+# engram-doctor does not surface (it checks health and configuration; this
+# tool answers "is my memory actually syncing, and to which cloud?").
+#
+# Never mutates any file, daemon, database, or config. Every database is
+# opened with mode=ro; no "engram" subcommand is ever invoked.
+#
+# Usage:
+#   engram-status            human-readable report (Spanish)
+#   engram-status --json     the same facts as machine-readable JSON (no
+#                             tokens)
+#   engram-status --help     this message
+#
+# Exit status: 0 when every configured instance's sync_state.lifecycle reads
+# "healthy" (vacuously 0 when no instance is configured); non-zero when any
+# instance is degraded, reports an unrecognized lifecycle, or its sync state
+# could not be read (missing/unreadable engram.db, missing sync_state row,
+# or sqlite3 unavailable). One broken instance never stops the others from
+# rendering — see gather_instance/render_instance_human below.
+set -uo pipefail
+
+ROUTER_CONFIG="${ENGRAM_ROUTER_CONFIG:-$HOME/.config/engram-router/router.json}"
+INSTANCES_ENV_DIR="${ENGRAM_ROUTER_INSTANCES_DIR:-$HOME/.config/engram-router/instances}"
+
+# How many non-enrolled-but-pending projects to name individually per
+# instance ("the top few by volume, not all seventy" — the feature doc's own
+# phrasing). The rest are folded into a trailing "... y N más" line.
+UNENROLLED_TOP_N=5
+
+JSON_MODE=0
+
+_self_dir() {
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_find_router_lib() {
+    local self_dir installed_lib sibling_lib
+    self_dir="$(_self_dir)"
+    installed_lib="${ENGRAM_ROUTER_LIB:-$HOME/.local/lib/engram-router/router.sh}"
+    sibling_lib="$self_dir/../lib/router.sh"
+    if [[ -r "$installed_lib" ]]; then
+        printf '%s\n' "$installed_lib"
+    elif [[ -r "$sibling_lib" ]]; then
+        printf '%s\n' "$sibling_lib"
+    else
+        return 1
+    fi
+}
+
+usage() {
+    cat <<'USAGE'
+Uso: engram-status [--json] [--help]
+
+Informe de solo lectura sobre el estado de sincronización de cada instancia
+de Engram configurada en router.json: destino en la nube (server_url de
+cloud.json, y si hay un token guardado — nunca su valor), si el daemon
+systemd está activo, si autosync está encendido, el estado de sync_state
+(saludable/degradada, contadores de mutaciones encoladas/confirmadas/pull,
+reason_code y último error cuando existen) y los proyectos con cambios sin
+sincronizar que no están enrolados (la causa habitual de una instancia
+degradada). También indica a qué instancia resuelve el directorio actual.
+
+Nunca escribe nada: cada base de datos se abre en modo solo lectura
+(mode=ro) y no se invoca ningún subcomando de "engram" que pudiera mutar
+algo.
+
+Opciones:
+  --json     Los mismos datos en JSON, sin tokens.
+  --help     Muestra esta ayuda.
+
+Salida: 0 si todas las instancias configuradas están saludables (o si no
+hay ninguna configurada); distinto de 0 si alguna está degradada, en un
+estado no reconocido, o su base de datos no se pudo leer.
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# sqlite3 availability. Documented decision: sqlite3 is NOT a hard
+# requirement to run this tool — without it, every instance's sync facts
+# render as an explicit "desconocido — sqlite3 no disponible" instead of the
+# tool refusing to run, matching the "degrade instead of failing" contract.
+# It DOES count toward a non-zero exit, the same as any other unreadable
+# database: without sqlite3 nothing here can confirm an instance is
+# healthy, and a tool that cannot confirm health must not report success.
+# ---------------------------------------------------------------------------
+SQLITE3_AVAILABLE=1
+command -v sqlite3 >/dev/null 2>&1 || SQLITE3_AVAILABLE=0
+
+# _sqlite_ro DB SQL
+# Runs SQL against DB opened via a "file:...?mode=ro" URI (read-only by
+# construction, never creates the file). Prints rows (columns separated by
+# \x1f, one row per line) on stdout.
+# Return codes: 0 = query ran (output may be empty = no rows), 1 = the
+# database could not be opened/queried, 2 = sqlite3 is not available.
+_sqlite_ro() {
+    local db="$1" sql="$2" out rc
+    [[ $SQLITE3_AVAILABLE -eq 1 ]] || return 2
+    out="$(sqlite3 -readonly -separator $'\x1f' "file:${db}?mode=ro" "$sql" 2>/dev/null)"
+    rc=$?
+    [[ $rc -eq 0 ]] || return 1
+    printf '%s' "$out"
+    return 0
+}
+
+# _probe_db DATA_DIR -> sets DB_STATUS to one of:
+#   ok          engram.db exists and opens read-only
+#   missing     no engram.db in this data dir yet (never provisioned/synced)
+#   unreadable  engram.db exists but could not be opened/queried
+#   no_sqlite3  sqlite3 itself is not available
+_probe_db() {
+    # Split `local` statement — see _read_cloud_json's comment on why.
+    local data_dir="$1"
+    local db="$data_dir/engram.db"
+    if [[ ! -e "$db" ]]; then
+        DB_STATUS="missing"
+        return
+    fi
+    local out rc
+    out="$(_sqlite_ro "$db" "SELECT 1;")"
+    rc=$?
+    case $rc in
+        0) DB_STATUS="ok" ;;
+        2) DB_STATUS="no_sqlite3" ;;
+        *) DB_STATUS="unreadable" ;;
+    esac
+}
+
+# _read_cloud_json DATA_DIR -> sets CLOUD_SERVER / CLOUD_TOKEN_PRESENT (0/1).
+# Reads the file directly (no "engram" subcommand), like
+# bin/engram-router's _instance_cloud_server. Returns 1 (treated as unknown,
+# never as an error) when the file is missing, unreadable, unparseable, or
+# has no server_url/server key.
+_read_cloud_json() {
+    # NOTE: every RHS in one `local` statement is expanded against the
+    # OUTER scope before any name in that statement becomes local (same
+    # pitfall install.sh's _instance_effective_data_dir documents) — under
+    # `set -u` that makes "local data_dir=... cloud_json=$data_dir/..." in
+    # one statement fail on an unset outer $data_dir. Split into two.
+    local data_dir="$1"
+    local cloud_json="$data_dir/cloud.json" content
+    CLOUD_SERVER=""
+    CLOUD_TOKEN_PRESENT=0
+    [[ -r "$cloud_json" ]] || return 1
+    content="$(cat "$cloud_json" 2>/dev/null)" || return 1
+    local -A obj=()
+    _router_json_parse_flat_object "$content" 0 obj || return 1
+    CLOUD_SERVER="${obj[server_url]:-${obj[server]:-}}"
+    [[ -n "${obj[token]:-}" ]] && CLOUD_TOKEN_PRESENT=1
+    [[ -n "$CLOUD_SERVER" ]] || return 1
+    return 0
+}
+
+# _autosync_state NAME -> prints "on" | "off" | "unknown".
+# Autosync is only "on" with an UNCOMMENTED ENGRAM_CLOUD_AUTOSYNC=1 line
+# (install.sh ships it commented out by default — see
+# write_instance_autosync_env). A missing env file, or one present with no
+# matching line, is a definite "off", not an unknown; an existing file this
+# process cannot read is the one unknown case.
+_autosync_state() {
+    # Split `local` statement — see _read_cloud_json's comment on why.
+    local name="$1"
+    local env_file="$INSTANCES_ENV_DIR/$name.env"
+    if [[ ! -e "$env_file" ]]; then
+        printf 'off\n'
+        return
+    fi
+    if [[ ! -r "$env_file" ]]; then
+        printf 'unknown\n'
+        return
+    fi
+    if grep -Eq '^[[:space:]]*ENGRAM_CLOUD_AUTOSYNC=1[[:space:]]*$' "$env_file"; then
+        printf 'on\n'
+    else
+        printf 'off\n'
+    fi
+}
+
+# _daemon_state NAME -> prints "active" | "inactive" | "failed" | "unknown".
+_daemon_state() {
+    local name="$1" state
+    command -v systemctl >/dev/null 2>&1 || { printf 'unknown\n'; return; }
+    state="$(systemctl --user is-active "engram@${name}.service" 2>/dev/null || true)"
+    case "$state" in
+        active|inactive|failed) printf '%s\n' "$state" ;;
+        *) printf 'unknown\n' ;;
+    esac
+}
+
+# _read_sync_state DB -> populates SYNC_* globals from the sync_state row
+# where target_key='cloud'. SYNC_HAS_ROW is 0 when the query succeeded but
+# found no row (never synced, or a target_key other than 'cloud'). Return
+# status mirrors _sqlite_ro: 1 means the query itself failed (caller should
+# already know this from DB_STATUS, since _probe_db ran first).
+_read_sync_state() {
+    local db="$1" row
+    SYNC_LIFECYCLE=""; SYNC_ENQUEUED=""; SYNC_ACKED=""; SYNC_PULLED=""
+    SYNC_REASON=""; SYNC_LAST_ERROR=""; SYNC_LAST_SUCCESS=""
+    SYNC_HAS_ROW=0
+    row="$(_sqlite_ro "$db" \
+        "SELECT lifecycle,last_enqueued_seq,last_acked_seq,last_pulled_seq,reason_code,last_error,last_success_at FROM sync_state WHERE target_key='cloud';")" || return 1
+    [[ -n "$row" ]] || return 0
+    IFS=$'\x1f' read -r SYNC_LIFECYCLE SYNC_ENQUEUED SYNC_ACKED SYNC_PULLED SYNC_REASON SYNC_LAST_ERROR SYNC_LAST_SUCCESS <<<"$row"
+    SYNC_HAS_ROW=1
+    return 0
+}
+
+# _read_enrolled DB -> populates the ENROLLED array (project names, sorted).
+_read_enrolled() {
+    local db="$1" out
+    ENROLLED=()
+    out="$(_sqlite_ro "$db" "SELECT project FROM sync_enrolled_projects ORDER BY project;")" || return 1
+    [[ -n "$out" ]] || return 0
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && ENROLLED+=("$line")
+    done <<<"$out"
+    return 0
+}
+
+# _read_unenrolled_pending DB -> populates parallel arrays
+# UNENROLLED_PROJECTS/UNENROLLED_COUNTS (all of them, ordered by volume
+# desc) and UNENROLLED_TOTAL (how many distinct projects). Rendering caps
+# how many are named individually; this function returns the full set so
+# the caller can report an accurate total.
+_read_unenrolled_pending() {
+    local db="$1" out
+    UNENROLLED_PROJECTS=(); UNENROLLED_COUNTS=(); UNENROLLED_TOTAL=0
+    out="$(_sqlite_ro "$db" \
+        "SELECT project, COUNT(*) FROM sync_mutations WHERE target_key='cloud' AND acked_at IS NULL AND project NOT IN (SELECT project FROM sync_enrolled_projects) GROUP BY project ORDER BY COUNT(*) DESC, project ASC;")" || return 1
+    [[ -n "$out" ]] || return 0
+    local proj cnt
+    while IFS=$'\x1f' read -r proj cnt; do
+        [[ -n "$proj" ]] || continue
+        UNENROLLED_PROJECTS+=("$proj")
+        UNENROLLED_COUNTS+=("$cnt")
+        UNENROLLED_TOTAL=$((UNENROLLED_TOTAL + 1))
+    done <<<"$out"
+    return 0
+}
+
+# gather_instance NAME
+# Populates every INST_*/DB_STATUS/CLOUD_*/SYNC_*/ENROLLED/UNENROLLED_*
+# global for one instance. Never aborts: each source degrades independently
+# (cloud.json, env file, database) so one broken source never blocks the
+# others for the same instance, let alone the rest of the run.
+gather_instance() {
+    local name="$1"
+    INST_NAME="$name"
+    INST_DATA_DIR="$(router_expand_path "${INSTANCE_DATA_DIR[$name]:-}")"
+    INST_PORT="${INSTANCE_PORT[$name]:-}"
+    INST_DAEMON="$(_daemon_state "$name")"
+    INST_AUTOSYNC="$(_autosync_state "$name")"
+
+    _read_cloud_json "$INST_DATA_DIR"
+    INST_CLOUD_OK=$?
+    [[ $INST_CLOUD_OK -eq 0 ]] && INST_CLOUD_OK=1 || INST_CLOUD_OK=0
+
+    _probe_db "$INST_DATA_DIR"
+    ENROLLED=(); UNENROLLED_PROJECTS=(); UNENROLLED_COUNTS=(); UNENROLLED_TOTAL=0
+    SYNC_HAS_ROW=0
+    if [[ "$DB_STATUS" == "ok" ]]; then
+        _read_sync_state "$INST_DATA_DIR/engram.db"
+        _read_enrolled "$INST_DATA_DIR/engram.db"
+        _read_unenrolled_pending "$INST_DATA_DIR/engram.db"
+    fi
+
+    INST_HEALTHY=0
+    if [[ "$DB_STATUS" == "ok" && $SYNC_HAS_ROW -eq 1 && "$SYNC_LIFECYCLE" == "healthy" ]]; then
+        INST_HEALTHY=1
+    fi
+}
+
+_label_daemon() {
+    case "$1" in
+        active) printf 'activo' ;;
+        inactive) printf 'inactivo' ;;
+        failed) printf 'fallido' ;;
+        *) printf 'desconocido' ;;
+    esac
+}
+
+_label_autosync() {
+    case "$1" in
+        on) printf 'activado' ;;
+        off) printf 'desactivado' ;;
+        *) printf 'desconocido' ;;
+    esac
+}
+
+# status_label -> the glanceable word shown in the section header and the
+# "sync:" line, from the already-gathered INST_/DB_STATUS/SYNC_* globals.
+_status_label() {
+    if [[ "$DB_STATUS" != "ok" || $SYNC_HAS_ROW -eq 0 ]]; then
+        printf 'DESCONOCIDO'
+    elif [[ "$SYNC_LIFECYCLE" == "healthy" ]]; then
+        printf 'SALUDABLE'
+    elif [[ "$SYNC_LIFECYCLE" == "degraded" ]]; then
+        printf 'DEGRADADA'
+    else
+        printf 'DESCONOCIDA (%s)' "$SYNC_LIFECYCLE"
+    fi
+}
+
+render_instance_human() {
+    local status_label
+    status_label="$(_status_label)"
+
+    printf '== Instancia: %s — %s ==\n' "$INST_NAME" "$status_label"
+    printf '  data dir:   %s (puerto %s)\n' "$INST_DATA_DIR" "${INST_PORT:-?}"
+    printf '  daemon:     %s\n' "$(_label_daemon "$INST_DAEMON")"
+
+    if [[ $INST_CLOUD_OK -eq 1 ]]; then
+        local token_label="ausente"
+        [[ $CLOUD_TOKEN_PRESENT -eq 1 ]] && token_label="presente"
+        printf '  cloud:      %s (cloud.json; token: %s)\n' "$CLOUD_SERVER" "$token_label"
+    else
+        printf '  cloud:      desconocido (sin cloud.json o no legible)\n'
+    fi
+
+    printf '  autosync:   %s\n' "$(_label_autosync "$INST_AUTOSYNC")"
+
+    case "$DB_STATUS" in
+        missing)
+            printf '  sync:       desconocido — la instancia no tiene engram.db todavía\n'
+            ;;
+        no_sqlite3)
+            printf '  sync:       desconocido — sqlite3 no está disponible en este sistema\n'
+            ;;
+        unreadable)
+            printf '  sync:       desconocido — engram.db no se pudo abrir en solo lectura\n'
+            ;;
+        ok)
+            if [[ $SYNC_HAS_ROW -eq 0 ]]; then
+                printf "  sync:       desconocido — sin fila sync_state para target_key='cloud'\n"
+            else
+                printf '  sync:       %s (lifecycle=%s)\n' "$status_label" "$SYNC_LIFECYCLE"
+                printf '              encoladas/confirmadas: %s/%s · pull: %s\n' \
+                    "${SYNC_ENQUEUED:-?}" "${SYNC_ACKED:-?}" "${SYNC_PULLED:-?}"
+                [[ -n "$SYNC_REASON" ]] && printf '              reason_code: %s\n' "$SYNC_REASON"
+                [[ -n "$SYNC_LAST_ERROR" ]] && printf '              último error: %s\n' "$SYNC_LAST_ERROR"
+                printf '              último éxito: %s\n' "${SYNC_LAST_SUCCESS:-desconocido}"
+            fi
+            ;;
+    esac
+
+    if [[ "$DB_STATUS" == "ok" ]]; then
+        if [[ ${#ENROLLED[@]} -eq 0 ]]; then
+            printf '  proyectos enrolados: ninguno\n'
+        else
+            # IFS=', ' would only use its FIRST character as the join
+            # separator (comma, no space) — join explicitly instead.
+            local joined="" p
+            for p in "${ENROLLED[@]}"; do
+                [[ -z "$joined" ]] && joined="$p" || joined="$joined, $p"
+            done
+            printf '  proyectos enrolados (%d): %s\n' "${#ENROLLED[@]}" "$joined"
+        fi
+
+        if [[ $UNENROLLED_TOTAL -eq 0 ]]; then
+            printf '  cambios sin sincronizar y sin enrolar: ninguno\n'
+        else
+            printf '  cambios sin sincronizar y sin enrolar (%d proyecto(s)):\n' "$UNENROLLED_TOTAL"
+            local i shown=0
+            for i in "${!UNENROLLED_PROJECTS[@]}"; do
+                [[ $shown -ge $UNENROLLED_TOP_N ]] && break
+                printf '    - %s: %s mutación(es)\n' "${UNENROLLED_PROJECTS[$i]}" "${UNENROLLED_COUNTS[$i]}"
+                shown=$((shown + 1))
+            done
+            if [[ $UNENROLLED_TOTAL -gt $UNENROLLED_TOP_N ]]; then
+                printf '    ... y %d más\n' "$((UNENROLLED_TOTAL - UNENROLLED_TOP_N))"
+            fi
+        fi
+    else
+        printf '  proyectos enrolados: desconocido\n'
+        printf '  cambios sin sincronizar y sin enrolar: desconocido\n'
+    fi
+    echo
+}
+
+# ---------------------------------------------------------------------------
+# JSON rendering. Deliberately hand-rolled (no jq dependency), same
+# discipline as lib/router.sh's own JSON parser: this project avoids
+# jq/python as a hard dependency so the tool keeps working on a bare
+# colleague machine.
+# ---------------------------------------------------------------------------
+_json_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/}"
+    s="${s//$'\n'/\\n}"
+    printf '"%s"' "$s"
+}
+
+_json_str_or_null() {
+    if [[ -z "$1" ]]; then printf 'null'; else _json_str "$1"; fi
+}
+
+_json_num_or_null() {
+    if [[ "$1" =~ ^-?[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+_json_bool() {
+    if [[ "$1" -eq 1 ]]; then printf 'true'; else printf 'false'; fi
+}
+
+_json_string_array() {  # prints a JSON array from the named bash array
+    local -n _arr="$1"
+    local out="[" first=1 v
+    for v in "${_arr[@]}"; do
+        [[ $first -eq 1 ]] || out+=","
+        out+="$(_json_str "$v")"
+        first=0
+    done
+    out+="]"
+    printf '%s' "$out"
+}
+
+render_instance_json() {
+    local j="{"
+    j+="\"name\":$(_json_str "$INST_NAME"),"
+    j+="\"data_dir\":$(_json_str "$INST_DATA_DIR"),"
+    j+="\"port\":$(_json_num_or_null "$INST_PORT"),"
+    j+="\"daemon\":$(_json_str "$INST_DAEMON"),"
+
+    if [[ $INST_CLOUD_OK -eq 1 ]]; then
+        j+="\"cloud\":{\"server_url\":$(_json_str "$CLOUD_SERVER"),\"source\":\"cloud.json\",\"token_present\":$(_json_bool "$CLOUD_TOKEN_PRESENT")},"
+    else
+        j+="\"cloud\":null,"
+    fi
+
+    j+="\"autosync\":$(_json_str "$INST_AUTOSYNC"),"
+    j+="\"db_status\":$(_json_str "$DB_STATUS"),"
+
+    if [[ "$DB_STATUS" == "ok" && $SYNC_HAS_ROW -eq 1 ]]; then
+        j+="\"sync\":{"
+        j+="\"lifecycle\":$(_json_str "$SYNC_LIFECYCLE"),"
+        j+="\"last_enqueued_seq\":$(_json_num_or_null "$SYNC_ENQUEUED"),"
+        j+="\"last_acked_seq\":$(_json_num_or_null "$SYNC_ACKED"),"
+        j+="\"last_pulled_seq\":$(_json_num_or_null "$SYNC_PULLED"),"
+        j+="\"reason_code\":$(_json_str_or_null "$SYNC_REASON"),"
+        j+="\"last_error\":$(_json_str_or_null "$SYNC_LAST_ERROR"),"
+        j+="\"last_success_at\":$(_json_str_or_null "$SYNC_LAST_SUCCESS")"
+        j+="},"
+    else
+        j+="\"sync\":null,"
+    fi
+
+    if [[ "$DB_STATUS" == "ok" ]]; then
+        j+="\"enrolled_projects\":$(_json_string_array ENROLLED),"
+        j+="\"unenrolled_pending\":{\"total\":$UNENROLLED_TOTAL,\"top\":["
+        local i first=1
+        for i in "${!UNENROLLED_PROJECTS[@]}"; do
+            [[ $i -ge $UNENROLLED_TOP_N ]] && break
+            [[ $first -eq 1 ]] || j+=","
+            j+="{\"project\":$(_json_str "${UNENROLLED_PROJECTS[$i]}"),\"mutations\":$(_json_num_or_null "${UNENROLLED_COUNTS[$i]}")}"
+            first=0
+        done
+        j+="]},"
+    else
+        j+="\"enrolled_projects\":null,"
+        j+="\"unenrolled_pending\":null,"
+    fi
+
+    j+="\"healthy\":$(_json_bool "$INST_HEALTHY")"
+    j+="}"
+    printf '%s' "$j"
+}
+
+# ---------------------------------------------------------------------------
+# Current directory resolution — same idiom as engram-doctor's
+# _resolve_current_dir_routing: resolve via the current directory's git
+# toplevel (or $PWD outside a repo), populate the ROUTER_* globals, and set
+# CURRENT_REPO_DIR. Never printed from inside a subshell, or the ROUTER_*
+# assignments would be dropped.
+# ---------------------------------------------------------------------------
+_resolve_current_dir_routing() {
+    CURRENT_REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    router_resolve "$CURRENT_REPO_DIR" "$ROUTER_CONFIG" || true
+}
+
+main() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --json) JSON_MODE=1 ;;
+            --help|-h) usage; exit 0 ;;
+            *)
+                echo "engram-status: opción desconocida: $arg" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    local router_lib
+    if ! router_lib="$(_find_router_lib)"; then
+        echo "engram-status: no se pudo localizar lib/router.sh" >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$router_lib"
+
+    if [[ -r "$ROUTER_CONFIG" ]]; then
+        router_load_config "$ROUTER_CONFIG" || {
+            echo "engram-status: no se pudo leer/parsear $ROUTER_CONFIG" >&2
+            exit 1
+        }
+    else
+        INSTANCE_NAMES=()
+        RULE_PREFIXES=()
+        RULE_INSTANCES=()
+    fi
+
+    local total=0 healthy=0
+    local -a json_instances=()
+
+    if [[ $JSON_MODE -eq 0 ]]; then
+        echo "engram-status — estado de sincronización (solo lectura)"
+        echo
+    fi
+
+    if [[ ${#INSTANCE_NAMES[@]} -eq 0 ]]; then
+        if [[ $JSON_MODE -eq 0 ]]; then
+            echo "no hay instancias configuradas en $ROUTER_CONFIG"
+            echo
+        fi
+    else
+        local name
+        for name in "${INSTANCE_NAMES[@]}"; do
+            gather_instance "$name"
+            total=$((total + 1))
+            [[ $INST_HEALTHY -eq 1 ]] && healthy=$((healthy + 1))
+            if [[ $JSON_MODE -eq 1 ]]; then
+                json_instances+=("$(render_instance_json)")
+            else
+                render_instance_human
+            fi
+        done
+    fi
+
+    _resolve_current_dir_routing
+    local repo_name
+    repo_name="$(basename "$CURRENT_REPO_DIR")"
+
+    if [[ $JSON_MODE -eq 0 ]]; then
+        echo "== Directorio actual =="
+        printf '  repo:       %s\n' "$repo_name"
+        if [[ -n "$ROUTER_INSTANCE" ]]; then
+            printf '  instancia:  %s (%s)\n' "$ROUTER_INSTANCE" "${ROUTER_DATA_DIR:-sin data_dir}"
+        else
+            printf '  instancia:  ninguna (sin resolver)\n'
+        fi
+        echo
+        printf 'resumen: %d de %d instancia(s) saludable(s)\n' "$healthy" "$total"
+    else
+        local out="{"
+        out+="\"sqlite3_available\":$(_json_bool "$SQLITE3_AVAILABLE"),"
+        out+="\"instances\":["
+        local i first=1
+        for i in "${!json_instances[@]}"; do
+            [[ $first -eq 1 ]] || out+=","
+            out+="${json_instances[$i]}"
+            first=0
+        done
+        out+="],"
+        out+="\"current_directory\":{\"repo\":$(_json_str "$repo_name"),\"instance\":$(_json_str_or_null "$ROUTER_INSTANCE")},"
+        out+="\"summary\":{\"healthy\":$healthy,\"total\":$total}"
+        out+="}"
+        printf '%s\n' "$out"
+    fi
+
+    [[ $healthy -eq $total ]]
+}
+
+# Guarded so tests can source this file to reach individual functions
+# without running the interactive main().
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

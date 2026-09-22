@@ -170,6 +170,7 @@ install_files() {
     install -m 0755 "$SCRIPT_DIR/bin/engram-router" "$PREFIX_BIN/engram-router"
     install -m 0755 "$SCRIPT_DIR/bin/engram-doctor" "$PREFIX_BIN/engram-doctor"
     install -m 0755 "$SCRIPT_DIR/bin/engram-migrate" "$PREFIX_BIN/engram-migrate"
+    install -m 0755 "$SCRIPT_DIR/bin/engram-status" "$PREFIX_BIN/engram-status"
     ln -sf "$PREFIX_BIN/engram-router" "$PREFIX_BIN/engram-where"
     install -m 0644 "$SCRIPT_DIR/lib/router.sh" "$LIB_DIR/router.sh"
 
