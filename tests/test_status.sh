@@ -104,6 +104,10 @@ cat >"$ROTO_DIR/cloud.json" <<EOF
 EOF
 chmod 0600 "$ROTO_DIR/cloud.json"
 
+# "sintabla"/"columnas": db opens but a query must fail (F1).
+SINTABLA_DIR="$DATA_DIR/engram-sintabla"; COLUMNAS_DIR="$DATA_DIR/engram-columnas"
+mkdir -p "$SINTABLA_DIR" "$COLUMNAS_DIR"
+
 # ---------------------------------------------------------------------------
 # Instance env files: trabajo autosync ON, personal OFF (commented, matching
 # install.sh's own template), problemas has no env file at all, roto ON.
@@ -165,6 +169,22 @@ SQL
 
     # "roto": not a valid sqlite database at all.
     printf 'this is not a sqlite database\n' > "$ROTO_DIR/engram.db"
+
+    # "sintabla": sync_state ok; sync_enrolled_projects table absent.
+    sqlite3 "$SINTABLA_DIR/engram.db" <<'SQL'
+CREATE TABLE sync_state (target_key TEXT, lifecycle TEXT, last_enqueued_seq INT,
+    last_acked_seq INT, last_pulled_seq INT, reason_code TEXT, last_error TEXT,
+    last_success_at TEXT);
+INSERT INTO sync_state VALUES ('cloud','healthy',1,1,1,NULL,NULL,'2026-09-21T00:00:00Z');
+SQL
+
+    # "columnas": sync_state has unexpected columns (schema drift).
+    sqlite3 "$COLUMNAS_DIR/engram.db" <<'SQL'
+CREATE TABLE sync_state (target_key TEXT, estado TEXT);
+INSERT INTO sync_state VALUES ('cloud','healthy');
+CREATE TABLE sync_enrolled_projects (project TEXT);
+CREATE TABLE sync_mutations (id INTEGER PRIMARY KEY, target_key TEXT, project TEXT, acked_at TEXT);
+SQL
 fi
 
 # ---------------------------------------------------------------------------
@@ -206,6 +226,14 @@ cat >"$EMPTY_CONFIG" <<'EOF'
   "rules": [],
   "instances": {}
 }
+EOF
+
+QUERYERR_CONFIG="$CONFIG_DIR/router-queryerr.json"
+cat >"$QUERYERR_CONFIG" <<EOF
+{ "rules": [], "instances": {
+  "sintabla-ts": { "data_dir": "$SINTABLA_DIR" },
+  "columnas-ts": { "data_dir": "$COLUMNAS_DIR" }
+} }
 EOF
 
 # ---------------------------------------------------------------------------
@@ -262,8 +290,9 @@ assert_match "trabajo section header shows SALUDABLE" \
     "== Instancia: trabajo-ts.*SALUDABLE" "$FULL_OUT"
 assert_match "trabajo cloud line shows its server_url and 'presente' token" \
     "cloud:.*https://cloud-trabajo\.example\.com.*token: presente" "$FULL_OUT"
+TRABAJO_BLOCK="$(awk '/== Instancia: trabajo-ts/{f=1} f{print} f&&/^$/{exit}' <<<"$FULL_OUT")"
 assert_match "trabajo autosync is activado" \
-    "trabajo" "$FULL_OUT"  # sanity anchor before the stricter check below
+    "autosync:[[:space:]]*activado" "$TRABAJO_BLOCK"
 assert_match "trabajo counters render enqueued/acked/pulled" \
     "12/12.*pull: 7" "$FULL_OUT"
 assert_match "trabajo enrolled projects listed, alphabetical" \
@@ -290,7 +319,7 @@ assert_not_match "problemas' own enrolled project never appears in the unenrolle
     "proyecto-a: [0-9]+ mutaci" "$FULL_OUT"
 
 assert_match "roto section header shows an unknown/degraded state, not a crash" \
-    "== Instancia: roto-ts" "$FULL_OUT"
+    "== Instancia: roto-ts.*DESCONOCID" "$FULL_OUT"
 assert_match "roto reports the database could not be opened" \
     "no se pudo abrir" "$FULL_OUT"
 assert_match "roto's cloud.json still renders (independent of db readability)" \
@@ -335,6 +364,30 @@ assert_match "reports no instances configured" \
     "no hay instancias configuradas" "$(cat "$STATUS_OUT")"
 assert_eq "exit status is 0 (vacuously healthy: nothing to fail)" \
     "0" "$STATUS_RC"
+
+echo
+echo "== a failed query renders as desconocido, not a false all-clear (F1) =="
+_run_status "$UNMATCHED_REPO" "$QUERYERR_CONFIG"
+QUERYERR_OUT="$(cat "$STATUS_OUT")"
+if [[ $SQLITE3_AVAILABLE -eq 1 ]]; then
+    assert_match "missing sync_enrolled_projects: enrolled renders desconocido" \
+        "proyectos enrolados: desconocido" "$QUERYERR_OUT"
+    assert_match "missing table also fails the unenrolled-pending query" \
+        "cambios sin sincronizar y sin enrolar: desconocido" "$QUERYERR_OUT"
+    assert_match "column-mismatch renders the OTHER instance as unknown too" \
+        "== Instancia: columnas-ts.*DESCONOCID" "$QUERYERR_OUT"
+fi
+assert_eq "exit status is non-zero: an openable db with a failed query is not healthy" \
+    "1" "$STATUS_RC"
+
+_run_status "$UNMATCHED_REPO" "$QUERYERR_CONFIG" --json
+QUERYERR_JSON="$(cat "$STATUS_OUT")"
+if [[ $SQLITE3_AVAILABLE -eq 1 ]]; then
+    assert_match "sintabla's enrolled_projects is null in --json, not []" \
+        '"name":"sintabla-ts".*"enrolled_projects":null' "$QUERYERR_JSON"
+    assert_match "sintabla is reported unhealthy despite its healthy sync row" \
+        '"name":"sintabla-ts".*"healthy":false' "$QUERYERR_JSON"
+fi
 
 # ===========================================================================
 # Current-directory resolution: matched and unmatched.

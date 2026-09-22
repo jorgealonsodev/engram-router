@@ -260,14 +260,19 @@ gather_instance() {
     _probe_db "$INST_DATA_DIR"
     ENROLLED=(); UNENROLLED_PROJECTS=(); UNENROLLED_COUNTS=(); UNENROLLED_TOTAL=0
     SYNC_HAS_ROW=0
+    # A failed query renders as an explicit unknown, never an empty result.
+    # Table-missing vs. other query errors are NOT distinguished: _sqlite_ro
+    # discards sqlite3's stderr, so both collapse to one "query failed" fact.
+    SYNC_QUERY_FAILED=0; ENROLLED_QUERY_FAILED=0; UNENROLLED_QUERY_FAILED=0
     if [[ "$DB_STATUS" == "ok" ]]; then
-        _read_sync_state "$INST_DATA_DIR/engram.db"
-        _read_enrolled "$INST_DATA_DIR/engram.db"
-        _read_unenrolled_pending "$INST_DATA_DIR/engram.db"
+        _read_sync_state "$INST_DATA_DIR/engram.db" || SYNC_QUERY_FAILED=1
+        _read_enrolled "$INST_DATA_DIR/engram.db" || ENROLLED_QUERY_FAILED=1
+        _read_unenrolled_pending "$INST_DATA_DIR/engram.db" || UNENROLLED_QUERY_FAILED=1
     fi
 
     INST_HEALTHY=0
-    if [[ "$DB_STATUS" == "ok" && $SYNC_HAS_ROW -eq 1 && "$SYNC_LIFECYCLE" == "healthy" ]]; then
+    if [[ "$DB_STATUS" == "ok" && $SYNC_HAS_ROW -eq 1 && "$SYNC_LIFECYCLE" == "healthy" \
+          && $ENROLLED_QUERY_FAILED -eq 0 && $UNENROLLED_QUERY_FAILED -eq 0 ]]; then
         INST_HEALTHY=1
     fi
 }
@@ -332,7 +337,9 @@ render_instance_human() {
             printf '  sync:       desconocido — engram.db no se pudo abrir en solo lectura\n'
             ;;
         ok)
-            if [[ $SYNC_HAS_ROW -eq 0 ]]; then
+            if [[ $SYNC_QUERY_FAILED -eq 1 ]]; then
+                printf '  sync:       desconocido — no se pudo consultar sync_state (tabla ausente o error de consulta)\n'
+            elif [[ $SYNC_HAS_ROW -eq 0 ]]; then
                 printf "  sync:       desconocido — sin fila sync_state para target_key='cloud'\n"
             else
                 printf '  sync:       %s (lifecycle=%s)\n' "$status_label" "$SYNC_LIFECYCLE"
@@ -346,7 +353,9 @@ render_instance_human() {
     esac
 
     if [[ "$DB_STATUS" == "ok" ]]; then
-        if [[ ${#ENROLLED[@]} -eq 0 ]]; then
+        if [[ $ENROLLED_QUERY_FAILED -eq 1 ]]; then
+            printf '  proyectos enrolados: desconocido — no se pudo consultar sync_enrolled_projects\n'
+        elif [[ ${#ENROLLED[@]} -eq 0 ]]; then
             printf '  proyectos enrolados: ninguno\n'
         else
             # IFS=', ' would only use its FIRST character as the join
@@ -358,7 +367,9 @@ render_instance_human() {
             printf '  proyectos enrolados (%d): %s\n' "${#ENROLLED[@]}" "$joined"
         fi
 
-        if [[ $UNENROLLED_TOTAL -eq 0 ]]; then
+        if [[ $UNENROLLED_QUERY_FAILED -eq 1 ]]; then
+            printf '  cambios sin sincronizar y sin enrolar: desconocido — no se pudo consultar sync_mutations\n'
+        elif [[ $UNENROLLED_TOTAL -eq 0 ]]; then
             printf '  cambios sin sincronizar y sin enrolar: ninguno\n'
         else
             printf '  cambios sin sincronizar y sin enrolar (%d proyecto(s)):\n' "$UNENROLLED_TOTAL"
@@ -449,8 +460,12 @@ render_instance_json() {
         j+="\"sync\":null,"
     fi
 
-    if [[ "$DB_STATUS" == "ok" ]]; then
+    if [[ "$DB_STATUS" == "ok" && $ENROLLED_QUERY_FAILED -eq 0 ]]; then
         j+="\"enrolled_projects\":$(_json_string_array ENROLLED),"
+    else
+        j+="\"enrolled_projects\":null,"
+    fi
+    if [[ "$DB_STATUS" == "ok" && $UNENROLLED_QUERY_FAILED -eq 0 ]]; then
         j+="\"unenrolled_pending\":{\"total\":$UNENROLLED_TOTAL,\"top\":["
         local i first=1
         for i in "${!UNENROLLED_PROJECTS[@]}"; do
@@ -461,7 +476,6 @@ render_instance_json() {
         done
         j+="]},"
     else
-        j+="\"enrolled_projects\":null,"
         j+="\"unenrolled_pending\":null,"
     fi
 
