@@ -128,9 +128,15 @@ retire_legacy_shim() {
 
     if [[ -L "$shim" ]]; then
         section "Retirando el shim antiguo"
-        say "AVISO: $shim es un enlace simbólico. Se deja intacto: el enrutado ya"
-        say "       no depende de ningún fichero llamado 'engram' en el PATH, así"
-        say "       que no hace falta tocarlo."
+        local target
+        target="$(readlink -f -- "$shim" 2>/dev/null || true)"
+        if [[ -n "$target" && -f "$target" ]] && grep -q 'engram-router-shim' "$target" 2>/dev/null; then
+            rm -f -- "$shim"
+            say "Retirado el enlace simbólico en $shim: apuntaba al shim antiguo; el destino no se toca."
+        else
+            say "AVISO: $shim es un enlace simbólico a un fichero ajeno; seguirá"
+            say "       ensombreciendo 'engram' en el PATH. Elimínelo a mano: rm $shim"
+        fi
         return 0
     fi
 

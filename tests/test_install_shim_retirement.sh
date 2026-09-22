@@ -185,9 +185,8 @@ assert_match "output warns that the foreign file is not ours" \
     'no es nuestro|ajeno|no pertenece' "$out3"
 
 # ===========================================================================
-# 4b) A symlink at $PREFIX_BIN/engram — even one pointing at a marker-
-#     carrying file — is left untouched, as a symlink, and the installer
-#     says so (retire_legacy_shim currently returns silently for symlinks).
+# 4b) symlink at $PREFIX_BIN/engram: marker target -> symlink removed only;
+#     foreign target -> left alone, warns it shadows engram.
 # ===========================================================================
 FIXTURE_SYM="$(mktemp -d)"
 mkdir -p "$FIXTURE_SYM/home/.local/bin"
@@ -199,21 +198,25 @@ echo "stale shim via symlink"
 EOF
 chmod 0755 "$FIXTURE_SYM/home/.local/marker-target"
 ln -s "$FIXTURE_SYM/home/.local/marker-target" "$BIN_SYM/engram"
-symlink_target_before="$(readlink "$BIN_SYM/engram")"
+sum_before="$(md5sum "$FIXTURE_SYM/home/.local/marker-target")"
 
 echo
-echo "== a symlink at \$PREFIX_BIN/engram (even at a marker file) is left untouched, and reported =="
+echo "== symlink -> marker file: symlink removed, target untouched =="
 out_sym="$(run_install "$FIXTURE_SYM/home" </dev/null 2>&1)"
-if [[ -L "$BIN_SYM/engram" ]]; then
-    _pass "\$PREFIX_BIN/engram symlink still exists as a symlink"
-    symlink_target_after="$(readlink "$BIN_SYM/engram")"
-    assert_eq "symlink target is unchanged" "$symlink_target_before" "$symlink_target_after"
-else
-    _fail "\$PREFIX_BIN/engram symlink still exists as a symlink" "not a symlink (or missing) after install"
-    _fail "symlink target is unchanged" "symlink missing"
-fi
-assert_match "output mentions the symlink was left alone" \
-    'enlace simbólico|symlink' "$out_sym"
+if [[ -e "$BIN_SYM/engram" ]]; then _fail "symlink to marker file is removed" "still present"
+else _pass "symlink to marker file is removed"; fi
+assert_eq "marker target is byte-identical" "$sum_before" "$(md5sum "$FIXTURE_SYM/home/.local/marker-target")"
+assert_match "output announces the symlink removal" \
+    'Retirado el enlace simbólico' "$out_sym"
+
+FOREIGN_TGT="$FIXTURE_SYM/home/.local/foreign-target"
+printf '#!/usr/bin/env bash\necho unrelated\n' > "$FOREIGN_TGT"
+chmod 0755 "$FOREIGN_TGT"; ln -sf "$FOREIGN_TGT" "$BIN_SYM/engram"
+out_sym2="$(run_install "$FIXTURE_SYM/home" </dev/null 2>&1)"
+if [[ -L "$BIN_SYM/engram" ]]; then _pass "symlink to foreign target still exists"
+else _fail "symlink to foreign target still exists" "removed"; fi
+assert_eq "symlink target is unchanged" "$FOREIGN_TGT" "$(readlink "$BIN_SYM/engram")"
+assert_match "output warns it keeps shadowing engram" 'ensombrec' "$out_sym2"
 rm -rf "$FIXTURE_SYM"
 
 # ===========================================================================
