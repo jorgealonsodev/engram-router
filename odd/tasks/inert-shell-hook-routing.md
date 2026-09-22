@@ -142,4 +142,43 @@ exactly as they do today.
   occurrence comment posted, no labels touched. Candidate-scoped decline run
   once and validated (`declined_this_candidate`). Verification of record for
   this task therefore follows the RDD-off tier (high): writer self-verification
-  above plus an independent verifier — result recorded below.
+  above plus an independent verifier. Independent verifier (sonnet, read-only,
+  clean worktree of c9f047f): tests reproduce 24/24 and 42/42; adversarial
+  read found no functional defect; verdict pass-with-notes. Notes (all low,
+  folded into T4): the `type -P` half of the "shadows nothing on PATH" test is
+  vacuous (bash's `type -P` always bypasses functions; the child-shell
+  `command -v` half is the discriminating one and passes); the `$PWD` cache
+  leaves `ENGRAM_DATA_DIR` stale if `router.json` changes while parked in the
+  same directory (document it); the suite calls the hook manually rather than
+  letting `PROMPT_COMMAND`/`chpwd` fire (verifier confirmed automatic firing
+  and re-eval dedup by hand in real bash and zsh). T1 checked off.
+- T2 — commit `2cf16d8` (amended once locally: the first `git add` aborted on the
+  already-staged deletion and left only `bin/engram` in the commit). Route:
+  delegated writer (sonnet); trigger: 3 non-trivial files. TDD observed: RED
+  8/25 → GREEN 25/25. Checks: `bash tests/test_install_shim_retirement.sh`
+  25/25; `bash tests/test_install_port.sh` 10/10; `bash tests/test_hook.sh`
+  24/24; `bash tests/test_router.sh` 42/42; `bash tests/test_engram_contract.sh`
+  19/19; `bash tests/test_migrate_source_pull.sh` 29/29; `bash -n install.sh`
+  and `uninstall.sh` ok; no `bin/engram"` install line left. Parent spot check
+  re-ran the new test and `test_install_port.sh`: identical; read the three new
+  installer functions and the uninstall gate. RDD assess from the boundary
+  58f8970: high (`executable_mode` on the deleted shim, `shell_process` in
+  install.sh). Native preflight entered through the canonical STATUS with
+  `--agent claude-code`, scoped to this commit (`--base-ref c9f047f`). This
+  path yields capture tokens that carry `--agent` (unlike the assess-derived
+  path used for T1; noted as evidence on gentle-ai#4804). Consent granted by
+  the user; lineage review-bd9dd5fe3ff65f27, four lenses. `review-risk`,
+  `review-resilience` and `review-readability` admitted; `review-reliability`
+  refused twice by the model provider's safeguards on the reviewer transport
+  (API error, not a gentle-ai defect; no report). Exact STATUS re-query
+  reoffered the identical slot; one relaunch, same refusal; no further retry.
+  User chose to decline this candidate: exact decline run once and validated
+  (`declined_this_candidate`). Verification of record follows the RDD-off
+  tier (high): writer self-verification above plus an independent verifier.
+  Independent verifier (sonnet, read-only, clean worktree of 2cf16d8): full
+  suite reproduced (25/25, 10/10, 24/24, 42/42, 19/19, 29/29; `bash -n` ok);
+  adversarial read found no correctness or safety defect; verdict
+  pass-with-notes. Notes (low, folded into T4): a symlink at
+  `$PREFIX_BIN/engram` is correctly left alone but not reported;
+  `_real_home_snapshot` in the new test does not cover the scanned dotfiles.
+  T2 checked off.

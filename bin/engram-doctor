@@ -98,8 +98,10 @@ check_env_pollution() {
 }
 
 # ---------------------------------------------------------------------------
-# Check 2: PATH precedence — the shim must win over any other "engram" on
-# PATH (e.g. the Homebrew install).
+# Check 2: no shadowing — "engram" must resolve to the real binary on PATH.
+# Routing no longer depends on a PATH shim, so nothing should ever want to
+# win precedence here; a marker-carrying file is a leftover from an earlier
+# install of this tool that the installer/uninstaller failed to retire.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Engram version drift. A warning, never a failure: a newer Engram is expected
@@ -141,18 +143,80 @@ check_engram_version() {
     warn "  muestra el servidor de cada instancia antes de fiarse de una migración."
 }
 
-check_path_precedence() {
-    echo "== Precedencia en PATH =="
+check_no_shadowing() {
+    echo "== Ausencia de shims que ensombrezcan 'engram' =="
     local resolved
     resolved="$(command -v engram 2>/dev/null || true)"
     if [[ -z "$resolved" ]]; then
-        fail "no se encontró 'engram' en absoluto en el PATH"
+        fail "no se encontró el binario real 'engram' en PATH. Instale/añada engram al PATH y vuelva a intentarlo."
         return
     fi
-    if [[ "$resolved" == "$SHIM_DIR/engram" ]]; then
-        pass "el shim ($resolved) tiene prioridad en PATH"
+    if grep -q 'engram-router-shim' "$resolved" 2>/dev/null; then
+        fail "un shim retirado sigue en PATH ($resolved); vuelva a ejecutar el instalador o elimínelo"
+        return
+    fi
+    pass "'engram' resuelve al binario real: $resolved; nada lo ensombrece"
+}
+
+# ---------------------------------------------------------------------------
+# Shared with check_current_repo_routing: resolve routing for the current
+# directory (its git toplevel, or $PWD outside a repo) and leave the
+# ROUTER_* globals from lib/router.sh populated for the caller to read.
+# ---------------------------------------------------------------------------
+_resolve_current_dir_routing() {
+    local repo_dir
+    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    router_resolve "$repo_dir" "$ROUTER_CONFIG" || true
+    printf '%s\n' "$repo_dir"
+}
+
+# Prints the eval line(s) the user should add to their shell rc file,
+# matching $SHELL the same way install.sh's print_hook_instructions does.
+_print_hook_eval_line() {
+    local shell_name
+    shell_name="$(basename "${SHELL:-}")"
+    case "$shell_name" in
+        bash)
+            printf '           añada a ~/.bashrc: eval "$(engram-router hook bash)"\n'
+            ;;
+        zsh)
+            printf '           añada a ~/.zshrc: eval "$(engram-router hook zsh)"\n'
+            ;;
+        *)
+            printf '           bash (~/.bashrc): eval "$(engram-router hook bash)"\n'
+            printf '           zsh  (~/.zshrc):  eval "$(engram-router hook zsh)"\n'
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Check 2b: is the shell hook actually loaded in this shell? Compares the
+# routing this directory resolves to (via router_resolve, same as Check 5
+# below) against the current process's ENGRAM_DATA_DIR.
+# ---------------------------------------------------------------------------
+check_hook_active() {
+    echo "== Hook de shell activo en este directorio =="
+    _resolve_current_dir_routing >/dev/null
+
+    local resolved_dir="" env_dir=""
+    [[ -n "$ROUTER_INSTANCE" ]] && resolved_dir="${ROUTER_DATA_DIR%/}"
+    [[ -n "${ENGRAM_DATA_DIR:-}" ]] && env_dir="${ENGRAM_DATA_DIR%/}"
+
+    if [[ -n "$ROUTER_INSTANCE" ]]; then
+        if [[ -z "${ENGRAM_DATA_DIR:-}" ]]; then
+            warn "el hook de shell no está cargado en esta shell: este directorio resuelve a '$ROUTER_INSTANCE' pero ENGRAM_DATA_DIR no está definido"
+            _print_hook_eval_line
+        elif [[ "$env_dir" == "$resolved_dir" ]]; then
+            pass "hook activo: ENGRAM_DATA_DIR apunta a la instancia '$ROUTER_INSTANCE'"
+        else
+            fail "ENGRAM_DATA_DIR ($ENGRAM_DATA_DIR) no coincide con la instancia que resuelve este directorio ('$ROUTER_INSTANCE' -> $ROUTER_DATA_DIR); las operaciones irían a la instancia equivocada"
+        fi
     else
-        fail "'engram' resuelve a $resolved, NO al shim ($SHIM_DIR/engram) — anteponga $SHIM_DIR al PATH (por ejemplo, en ~/.bashrc: export PATH=\"$SHIM_DIR:\$PATH\", antes de cualquier línea que añada Homebrew al PATH)"
+        if [[ -z "${ENGRAM_DATA_DIR:-}" ]]; then
+            pass "este directorio no resuelve a ninguna instancia; ENGRAM_DATA_DIR sin definir (correcto)"
+        else
+            warn "ENGRAM_DATA_DIR está definido ($ENGRAM_DATA_DIR) pero este directorio no resuelve a ninguna instancia; si viene de un directorio anterior el hook debería haberlo limpiado"
+        fi
     fi
 }
 
@@ -325,9 +389,7 @@ check_port_conflicts() {
 check_current_repo_routing() {
     echo "== Enrutamiento del repositorio actual =="
     local repo_dir
-    repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-
-    router_resolve "$repo_dir" "$ROUTER_CONFIG" || true
+    repo_dir="$(_resolve_current_dir_routing)"
 
     printf '  repo:      %s\n' "$(basename "$repo_dir")"
     printf '  remote:    %s\n' "${ROUTER_NORMALIZED:-${ROUTER_REMOTE:-"(sin remoto)"}}"
@@ -369,7 +431,9 @@ main() {
     echo
     check_env_pollution
     echo
-    check_path_precedence
+    check_no_shadowing
+    echo
+    check_hook_active
     echo
     check_instance_destinations
     echo
