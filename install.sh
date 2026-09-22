@@ -464,6 +464,59 @@ assign_all_ports() {
     done
 }
 
+# _write_env_kv_body ENV_FILE KEY VALUE
+# Streams ENV_FILE to stdout with its first "KEY=..." line replaced in place
+# by "KEY=VALUE" (any further duplicate KEY= lines are dropped), or with
+# "KEY=VALUE" appended if the key was not present. Every other line is
+# passed through unchanged, in order, including a last line that has no
+# trailing newline in ENV_FILE (every emitted line gets one, so the result
+# is always well-formed). VALUE is written with a plain printf, never
+# interpolated into sed/awk, so no byte in it (|, &, a trailing backslash,
+# spaces, quotes) is ever reinterpreted.
+_write_env_kv_body() {
+    local env_file="$1" key="$2" value="$3"
+    local replaced=0 line
+    if [[ -s "$env_file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "$key="* ]]; then
+                if [[ $replaced -eq 0 ]]; then
+                    printf '%s\n' "$key=$value" || return 1
+                    replaced=1
+                fi
+                # else: drop a duplicate/pre-existing extra KEY= line
+            else
+                printf '%s\n' "$line" || return 1
+            fi
+        done < "$env_file"
+    fi
+    if [[ $replaced -eq 0 ]]; then
+        printf '%s\n' "$key=$value" || return 1
+    fi
+    return 0
+}
+
+# _write_env_kv ENV_FILE KEY VALUE
+# Writes the rewritten content to a temp file first and only replaces
+# ENV_FILE with it once that write has fully succeeded; on any failure the
+# temp file is removed, ENV_FILE is left untouched, and this returns
+# non-zero. This is what write_instance_port_env and
+# write_instance_data_dir_env share instead of each running its own sed
+# over the value — sed's delimiter can collide with a value byte (e.g. '|'
+# in a data_dir), which used to leave the env file at 0 bytes with sed
+# failing but `mv` still succeeding. Safe under `set -euo pipefail`: the
+# body runs as the condition of an `if`, so its failure never triggers
+# errexit here.
+_write_env_kv() {
+    local env_file="$1" key="$2" value="$3"
+    local tmp
+    tmp="$(mktemp "${env_file}.XXXXXX")" || return 1
+    if ! _write_env_kv_body "$env_file" "$key" "$value" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv -- "$tmp" "$env_file"
+}
+
 # Writes/updates ENGRAM_PORT=<n> in <instance>.env, preserving every other
 # line (in particular the user's own ENGRAM_CLOUD_AUTOSYNC choice). Runs for
 # every instance on every install, not only newly provisioned ones, so an
@@ -474,14 +527,56 @@ write_instance_port_env() {
     local env_file="$INSTANCES_ENV_DIR/$name.env"
     mkdir -p "$INSTANCES_ENV_DIR"
     [[ -e "$env_file" ]] || : > "$env_file"
-    if grep -q '^ENGRAM_PORT=' "$env_file" 2>/dev/null; then
-        local tmp
-        tmp="$(mktemp "$INSTANCES_ENV_DIR/.port.XXXXXX")"
-        sed "s/^ENGRAM_PORT=.*/ENGRAM_PORT=$port/" "$env_file" > "$tmp"
-        mv "$tmp" "$env_file"
-    else
-        printf 'ENGRAM_PORT=%s\n' "$port" >> "$env_file"
-    fi
+    _write_env_kv "$env_file" "ENGRAM_PORT" "$port"
+}
+
+# Writes/updates ENGRAM_DATA_DIR=<dir> in <instance>.env, preserving every
+# other line. Runs for every instance on every install, not only newly
+# provisioned ones, the same way write_instance_port_env does for ENGRAM_PORT.
+#
+# The systemd unit's own Environment= line derives the data dir from the
+# instance NAME (%i), which only matches by coincidence: an instance whose
+# router.json data_dir lives elsewhere (renamed, reused from an older
+# install, or pointed at a non-default path) would otherwise be served from
+# the wrong, silently-created directory. EnvironmentFile= is read after
+# Environment= and overrides it, so writing the real path here is what makes
+# the daemon serve the data_dir router.json actually points at.
+#
+# CALLER'S RESPONSIBILITY: `dir` must already be expanded (no literal
+# "$HOME"/"~" token). EnvironmentFile= is read verbatim by systemd — it does
+# not expand either form — so this function never expands `dir` itself; the
+# one call site (main(), writing the loop over every instance) expands it
+# with router_expand_path before calling this, because that is the only
+# place a raw, config-sourced value (kept from an existing router.json) is
+# ever turned into something instance-specific like an env file.
+write_instance_data_dir_env() {
+    local name="$1" dir="$2"
+    local env_file="$INSTANCES_ENV_DIR/$name.env"
+    mkdir -p "$INSTANCES_ENV_DIR"
+    [[ -e "$env_file" ]] || : > "$env_file"
+    _write_env_kv "$env_file" "ENGRAM_DATA_DIR" "$dir"
+}
+
+# _instance_effective_data_dir NAME -> data dir the daemon actually serves
+# now: NAME's env ENGRAM_DATA_DIR if present, else the unit's name-derived
+# default. Detects a repoint away from a directory that still holds data.
+_instance_effective_data_dir() {
+    # NOTE: bash expands every RHS in a single `local` statement in the
+    # OUTER scope before any of that statement's names become local, so a
+    # later assignment in the same statement must never reference an
+    # earlier one declared right there — split into two statements instead.
+    local name="$1"
+    local env_file="$INSTANCES_ENV_DIR/$name.env" cur=""
+    [[ -r "$env_file" ]] && cur="$(sed -n 's/^ENGRAM_DATA_DIR=//p' "$env_file" | tail -n1)"
+    printf '%s\n' "${cur:-$HOME/.local/share/engram-$name}"
+}
+
+# _load_router_expand_path -> sources lib/router.sh and, via exit status,
+# reports whether router_expand_path actually got defined: sourcing can
+# "succeed" while leaving it undefined (a corrupted/partial router.sh).
+_load_router_expand_path() {
+    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh" 2>/dev/null || true
+    declare -F router_expand_path >/dev/null
 }
 
 read_new_name() {
@@ -989,12 +1084,55 @@ main() {
 
     write_router_config
 
-    # Every instance's port lands in its env file every run, not only newly
-    # touched ones: this is what keeps an instance stable across a re-run
-    # that only just gave it a port in router.json.
+    # Every instance's port and data dir land in its env file every run, not
+    # only newly touched ones: this is what keeps an instance stable across a
+    # re-run that only just gave it a port in router.json, and what keeps the
+    # daemon serving the data_dir router.json actually points at rather than
+    # the one the systemd unit's Environment= line derives from the name.
+    #
+    # INSTANCE_DIRS[$idx] must be expanded before it reaches
+    # write_instance_data_dir_env: for an instance kept from an existing
+    # router.json (non-interactive re-run, or a menu choice that keeps
+    # instances) it is the raw config value, which by this project's own
+    # convention (config/router.example.json, router_expand_path,
+    # bin/engram-migrate) may be "$HOME/..." or "~/...". router.json is
+    # supposed to store that raw form — router_load_config/router_expand_path
+    # expand it back at read time — but EnvironmentFile= is read verbatim by
+    # systemd, which does not expand either token, so the env file needs the
+    # already-expanded path. router_expand_path is idempotent on an
+    # already-absolute path (no leading "$HOME"/"~" token), so expanding an
+    # already-expanded dir here — the freshly-typed/default case — is a
+    # no-op.
+    local router_lib_ok=1 new_dir eff_dir
+    local -a skipped_data_dirs=()
+    _load_router_expand_path || router_lib_ok=0
+    if [[ $router_lib_ok -eq 0 ]]; then
+        say ""
+        say "AVISO: no se pudo cargar lib/router.sh (router_expand_path no está"
+        say "definida). No se escribirá ENGRAM_DATA_DIR esta vez; revise esa"
+        say "librería y vuelva a ejecutar el instalador."
+    fi
     for idx in "${!INSTANCES_TO_PROVISION[@]}"; do
-        write_instance_port_env "${INSTANCES_TO_PROVISION[$idx]}" "${INSTANCE_PORTS[$idx]}"
+        name="${INSTANCES_TO_PROVISION[$idx]}"
+        write_instance_port_env "$name" "${INSTANCE_PORTS[$idx]}"
+        [[ $router_lib_ok -eq 1 ]] || continue
+        new_dir="$(router_expand_path "${INSTANCE_DIRS[$idx]}")"
+        eff_dir="$(_instance_effective_data_dir "$name")"
+        if [[ "$eff_dir" != "$new_dir" && -f "$eff_dir/engram.db" ]]; then
+            skipped_data_dirs+=("$name")
+            say ""
+            say "AVISO: '$name' sigue sirviendo datos reales en $eff_dir; la"
+            say "configuración apunta ahora a $new_dir. No se ha tocado su"
+            say "ENGRAM_DATA_DIR. Use engram-migrate, o corrija router.json."
+        else
+            write_instance_data_dir_env "$name" "$new_dir"
+        fi
     done
+    if [[ ${#skipped_data_dirs[@]} -gt 0 ]]; then
+        say ""
+        say "RESUMEN: ENGRAM_DATA_DIR sin tocar para: ${skipped_data_dirs[*]}"
+        say "(vea los avisos de arriba antes de continuar)."
+    fi
 
     section "Aviso final"
     say "Si ya tenía una instalación de Engram de instancia única en uso, es"
