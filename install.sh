@@ -937,6 +937,25 @@ verify_no_shadowing() {
 # because the marker line is detected and the question is skipped. An
 # other/unknown shell keeps the old print-only behaviour exactly, unasked.
 # ---------------------------------------------------------------------------
+# Heredoc-aware: skips an eval line inside a "<<[-]DELIM ... DELIM" body
+# (inert data). Heuristic, not a parser: no quoted-delimiter whitespace,
+# multiple heredocs per line, or nested same-name heredocs.
+hook_eval_line_present() {  # rc_file
+    local f="$1" heredoc="" line stripped
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$heredoc" ]]; then
+            stripped="${line#"${line%%[![:space:]]*}"}"
+            [[ "$stripped" == "$heredoc" ]] && heredoc=""
+            continue
+        fi
+        if [[ "$line" =~ \<\<-?[[:space:]]*[\"\']?([A-Za-z_][A-Za-z0-9_]*) ]]; then
+            heredoc="${BASH_REMATCH[1]}"
+            continue
+        fi
+        [[ "$line" =~ ^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook ]] && return 0
+    done < "$f"
+    return 1
+}
 offer_shell_integration() {
     section "Integración con la shell"
     say "El enrutado ya no depende de ningún binario en PATH: ahora lo hace un"
@@ -988,7 +1007,7 @@ offer_shell_integration() {
     # "$(engram-router hook bash)") does nothing at shell start-up, so it
     # deliberately does NOT count as loaded either — the anchor requires
     # "eval" right after optional leading whitespace, never after "#".
-    if [[ -f "$rc_file" ]] && grep -Eq '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$rc_file" 2>/dev/null; then
+    if [[ -f "$rc_file" ]] && hook_eval_line_present "$rc_file" 2>/dev/null; then
         say "$display_rc ya carga el hook de engram-router; no hace falta nada más."
         # Explicit 0: an empty lock_fd (e.g. flock missing) makes the guard
         # below false (status 1); a bare "return" would leak that as ours.
@@ -1033,7 +1052,10 @@ offer_shell_integration() {
                 else backup=""; ok=0; fi
             fi
             [[ $ok -eq 1 ]] && { tmp="$(mktemp "${write_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
-            [[ $ok -eq 1 ]] && { { [[ $rc_existed -eq 1 ]] && cat "$write_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
+            # Guarded separately: "{ cat; printf; } > tmp" reports only the
+            # last command's status, masking a failing cat behind printf's ok.
+            [[ $ok -eq 1 && $rc_existed -eq 1 ]] && { cat "$write_file" >> "$tmp" || ok=0; }
+            [[ $ok -eq 1 ]] && { printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell" >> "$tmp" || ok=0; }
             if [[ $ok -eq 1 ]]; then
                 if [[ $rc_existed -eq 1 ]]; then
                     # --reference is GNU-only (missing on BusyBox/toybox/BSD

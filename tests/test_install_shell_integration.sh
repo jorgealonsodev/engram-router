@@ -359,6 +359,14 @@ fi
 real_line_count_9c="$(grep -Ec '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$H9c/.bashrc" 2>/dev/null || true)"
 assert_eq "D1(c): exactly one genuine (uncommented) eval line exists" "1" "${real_line_count_9c:-0}"
 
+echo
+echo "== D1(d): an eval line inside a heredoc BODY is inert data, not a loaded hook =="
+H9d="$(new_fixture)"
+printf 'cat <<EOF\neval "$(engram-router hook bash)"\nEOF\n' > "$H9d/.bashrc"
+out9d="$(run_offer "$H9d" /bin/bash "")"
+assert_not_match "D1(d): 'ya carga' is NOT printed for a heredoc-body eval" 'ya (carga|está)' "$out9d"
+assert_match "D1(d): the question IS asked" '¿Añado esta línea' "$out9d"
+
 # ===========================================================================
 # 10) D2: concurrency — N concurrent invocations against the same fixture
 #     $HOME, all answering "s", must serialize into exactly one marker block,
@@ -469,6 +477,22 @@ assert_match "B: output still says the line was added" 'Añadid' "$outG"
 marker_count_g="$(grep -c 'engram-router hook bash' "$Hg/.bashrc" 2>/dev/null || true)"
 assert_eq "B: marker/eval line was written despite chmod --reference failing" "1" "${marker_count_g:-0}"
 assert_eq "B: no leftover *.engram-router.* temp file" "" "$(find "$Hg" -maxdepth 1 -name '*.engram-router.*' 2>/dev/null)"
+
+echo
+echo "== C: a failing 'cat' re-read does not lose the rc file's content =="
+Hh="$(new_fixture)"
+printf 'export ORIG=1\n' > "$Hh/.bashrc"
+orig_h="$(cat "$Hh/.bashrc")"
+bindir_cat="$(mktemp -d)"; FIXTURES+=("$bindir_cat")
+printf '#!/usr/bin/env bash\nexit 1\n' > "$bindir_cat/cat"
+chmod +x "$bindir_cat/cat"
+outH="$(export HOME="$Hh" SHELL=/bin/bash PATH="$bindir_cat:$PATH"
+    source "$ROOT_DIR/install.sh" 2>/dev/null
+    printf 's\n' | offer_shell_integration
+    printf 'SURVIVED=%d\n' "$?")"
+assert_match "C: survives (non-fatal under set -e)" 'SURVIVED=0' "$outH"
+assert_match "C: Spanish degrade message shown" 'No se pudo añadir' "$outH"
+assert_eq "C: rc file keeps its original content" "$orig_h" "$(cat "$Hh/.bashrc")"
 
 # ===========================================================================
 # 8) real $HOME is untouched.
