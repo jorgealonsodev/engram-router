@@ -5,7 +5,10 @@
 # language contract. Code/comments stay in English.
 #
 # Safe to re-run (idempotent): existing cloud.json / router.json content is
-# never silently overwritten, and no dotfile is ever edited automatically.
+# never silently overwritten. Dotfiles are never edited without an explicit
+# "yes" to the shell-integration question; even then, only the rc file that
+# matches $SHELL is touched, and only to append one marker-tagged eval line
+# behind a timestamped backup.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -925,12 +928,16 @@ verify_no_shadowing() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7 — print the shell-hook line for the user's shell. install.sh never
-# edits dotfiles (see the header comment), so the line is printed for the
-# person to add by hand, chosen from $SHELL when it names a known shell and
-# both otherwise.
+# Step 7 — print the shell-hook line for the user's shell and, only for a
+# known shell ($SHELL basename is bash or zsh), offer to add it. This is the
+# one exception to "install.sh never edits dotfiles": it edits at most one
+# rc file, and only after an explicit "yes" to this one question (default
+# No). On yes, it takes a timestamped backup of the rc file (if it exists)
+# and appends exactly one marker-tagged eval line; re-running is idempotent
+# because the marker line is detected and the question is skipped. An
+# other/unknown shell keeps the old print-only behaviour exactly, unasked.
 # ---------------------------------------------------------------------------
-print_hook_instructions() {
+offer_shell_integration() {
     section "Integración con la shell"
     say "El enrutado ya no depende de ningún binario en PATH: ahora lo hace un"
     say "hook de shell que exporta ENGRAM_DATA_DIR según el directorio actual,"
@@ -940,20 +947,57 @@ print_hook_instructions() {
     local shell_name
     shell_name="$(basename "${SHELL:-}")"
 
+    local rc_file="" hook_shell="" display_rc=""
     case "$shell_name" in
-        bash)
-            say "Añada esta línea a ~/.bashrc:"
-            say "  eval \"\$(engram-router hook bash)\""
-            ;;
-        zsh)
-            say "Añada esta línea a ~/.zshrc:"
-            say "  eval \"\$(engram-router hook zsh)\""
+        bash) rc_file="$HOME/.bashrc"; hook_shell="bash"; display_rc="~/.bashrc" ;;
+        zsh)  rc_file="$HOME/.zshrc";  hook_shell="zsh";  display_rc="~/.zshrc" ;;
+    esac
+
+    if [[ -z "$hook_shell" ]]; then
+        say "No se ha reconocido \$SHELL (${SHELL:-sin definir}). Añada la línea"
+        say "que corresponda a su shell:"
+        say "  bash (~/.bashrc): eval \"\$(engram-router hook bash)\""
+        say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
+        say ""
+        say "Después, abra una terminal nueva y ejecute: engram-doctor"
+        return
+    fi
+
+    if [[ -f "$rc_file" ]] && grep -q 'engram-router hook' "$rc_file" 2>/dev/null; then
+        say "$display_rc ya carga el hook de engram-router; no hace falta nada más."
+        return
+    fi
+
+    say "Añada esta línea a $display_rc:"
+    say "  eval \"\$(engram-router hook $hook_shell)\""
+    say ""
+
+    # printf (not "read -p") so the question is visible even when stdin is
+    # not a terminal (e.g. piped or /dev/null in tests and non-interactive
+    # runs) — bash only shows a "read -p" prompt on an actual tty.
+    printf '¿Añado esta línea a %s ahora? [s/N]: ' "$display_rc"
+    local answer=""
+    read -r answer || answer=""
+
+    case "$answer" in
+        s|S|si|Si|SI|sí|Sí|SÍ|y|Y|yes|Yes|YES)
+            local backup=""
+            if [[ -e "$rc_file" ]]; then
+                backup="${rc_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)"
+                cp -p "$rc_file" "$backup"
+            fi
+            {
+                printf '\n'
+                printf '# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\n'
+                printf 'eval "$(engram-router hook %s)"\n' "$hook_shell"
+            } >> "$rc_file"
+            say "Añadida la línea a $display_rc."
+            if [[ -n "$backup" ]]; then
+                say "Copia de seguridad del archivo original: $backup"
+            fi
             ;;
         *)
-            say "No se ha reconocido \$SHELL (${SHELL:-sin definir}). Añada la línea"
-            say "que corresponda a su shell:"
-            say "  bash (~/.bashrc): eval \"\$(engram-router hook bash)\""
-            say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
+            : # nothing to do; the line above already tells them what to add
             ;;
     esac
 
@@ -1005,7 +1049,7 @@ main() {
     local shadow_ok=1
     verify_no_shadowing || shadow_ok=0
 
-    print_hook_instructions
+    offer_shell_integration
 
     section "Ejecutando engram-doctor"
     "$PREFIX_BIN/engram-doctor" || true

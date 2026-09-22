@@ -113,21 +113,32 @@ tool adds an `instance` key to it rather than introducing a second marker file.
   this repository references that path.
 - **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
   `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
-  `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It
-  never edits them — including the line that loads the shell hook (see
-  [Shell integration](#shell-integration)): the installer prints it, you add
-  it.
+  `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any.
+  For the line that loads the shell hook (see
+  [Shell integration](#shell-integration)), the installer only ever touches
+  your `~/.bashrc` or `~/.zshrc`, and only after asking one yes/no question
+  — default is no. Say yes and it takes a timestamped backup first, then
+  appends exactly one marker-tagged line; say no and it just prints the line
+  for you to add by hand, same as before.
 - **Engram's source.** No patch, no fork, no rebuild.
 
 ## Shell integration
 
 Routing is not a binary on PATH. `install.sh` never installs anything named
-`engram`; instead it prints one line for you to add to your shell's rc file:
+`engram`; instead it prints the line for your shell and offers to add it for
+you:
 
 ```sh
 eval "$(engram-router hook bash)"   # ~/.bashrc
 eval "$(engram-router hook zsh)"    # ~/.zshrc
 ```
+
+Say yes to the installer's question and it backs up your rc file, then
+appends that one line behind a `[engram-router]` marker comment, and tells
+you where the backup went. Say no (the default) and it just prints the line,
+exactly as before. Either way, re-running the installer never asks again
+once the marker line is already there, and it never touches anything else in
+the file.
 
 That line defines two things in the interactive shell that sources it:
 
@@ -171,10 +182,10 @@ the real, Homebrew-installed binary.
 
 Re-run `./install.sh`: it retires `~/.local/bin/engram` for you, but only if
 it still carries the `engram-router-shim` marker; anything else found there
-is left alone and reported. Add the `eval` line above to your rc file, open a
-new terminal, and run `engram-doctor` — it now also checks that nothing
-shadows `engram` in PATH and that the hook is actually loaded in the
-directory you run it from.
+is left alone and reported. Say yes when it offers to add the `eval` line
+above to your rc file (or add it yourself), open a new terminal, and run
+`engram-doctor` — it now also checks that nothing shadows `engram` in PATH
+and that the hook is actually loaded in the directory you run it from.
 
 ## The environment hazard
 
