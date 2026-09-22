@@ -81,9 +81,18 @@ while IFS= read -r line; do
     [[ -n "$line" ]] && INSTANCES+=("$line")
 done < <(discover_instances)
 
+# $PREFIX_BIN/engram is a special case: only a file carrying the
+# engram-router-shim marker (a leftover from an install before the shell-hook
+# routing existed) is ever removed. A real binary or any other foreign file
+# there is never touched — see the header comment.
+legacy_shim="$PREFIX_BIN/engram"
+legacy_shim_is_ours=0
+if [[ -f "$legacy_shim" && ! -L "$legacy_shim" ]] && grep -q 'engram-router-shim' "$legacy_shim" 2>/dev/null; then
+    legacy_shim_is_ours=1
+fi
+
 section "Qué se va a eliminar"
 COMPONENTS=(
-    "$PREFIX_BIN/engram"
     "$PREFIX_BIN/engram-router"
     "$PREFIX_BIN/engram-doctor"
     "$PREFIX_BIN/engram-migrate"
@@ -93,6 +102,14 @@ COMPONENTS=(
     "$SYSTEMD_USER_DIR/engram@.service"
 )
 present=0
+if [[ -e "$legacy_shim" || -L "$legacy_shim" ]]; then
+    if [[ $legacy_shim_is_ours -eq 1 ]]; then
+        say "eliminar   $legacy_shim  (shim antiguo retirado)"
+        present=$((present + 1))
+    else
+        say "CONSERVAR  $legacy_shim  (no es nuestro: no lleva la marca engram-router-shim)"
+    fi
+fi
 for path in "${COMPONENTS[@]}"; do
     if [[ -e "$path" || -L "$path" ]]; then
         say "eliminar   $path"
@@ -139,6 +156,10 @@ else
 fi
 
 section "Eliminando componentes"
+if [[ $legacy_shim_is_ours -eq 1 ]]; then
+    rm -rf -- "$legacy_shim"
+    say "eliminado  $legacy_shim"
+fi
 for path in "${COMPONENTS[@]}"; do
     if [[ -e "$path" || -L "$path" ]]; then
         rm -rf -- "$path"
@@ -176,6 +197,10 @@ fi
 
 section "Después de desinstalar"
 say "El comando 'engram' vuelve a ser el binario original, sin enrutado."
+say "Si su ~/.bashrc o ~/.zshrc tiene una línea 'eval \"\$(engram-router hook"
+say "...)\"', ya no hace nada dañino (engram-router ha desaparecido), pero"
+say "puede borrarla si quiere dejar el fichero limpio."
+say ""
 say "Si durante la instalación retiró ENGRAM_CLOUD_* de su entorno, compruebe"
 say "que ~/.engram/cloud.json tiene credenciales válidas antes de sincronizar:"
 say ""

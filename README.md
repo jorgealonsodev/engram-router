@@ -8,7 +8,7 @@ projects cannot replicate data to the wrong server.
 
 `odd/tasks/engram-multi-cloud-router.md` records what was measured about
 Engram's behaviour and why each decision followed from it — why enrollment
-cannot select a destination, why the shim fails closed, why a namespace is
+cannot select a destination, why routing fails closed, why a namespace is
 derived from the remote. Read it before changing routing or the migration
 order; most of it was learned by things breaking quietly.
 
@@ -17,9 +17,9 @@ machine is not, and `engram-doctor` reports that per person instead.
 
 ## Requirements
 
-Linux or macOS. The shim, the installer and the per-instance daemons are bash
-and systemd user units; Windows is not supported and is not planned — see
-[Not supported](#not-supported).
+Linux or macOS. The shell hook, the installer and the per-instance daemons
+are bash and systemd user units; Windows is not supported and is not
+planned — see [Not supported](#not-supported).
 
 Engram itself, `git`, and `sqlite3` for the migration's row check (optional;
 without it the check degrades to a weaker one).
@@ -80,7 +80,6 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 
 | Path | Purpose | Mode |
 |---|---|---|
-| `~/.local/bin/engram` | the PATH shim | 0755 |
 | `~/.local/bin/engram-router` | resolution and explanation | 0755 |
 | `~/.local/bin/engram-doctor` | read-only diagnostics | 0755 |
 | `~/.local/bin/engram-migrate` | moves a project between instances | 0755 |
@@ -94,7 +93,8 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 
 `~/.local/share/engram-<instance>/engram.db` and `.instance-id` are created by
 Engram itself, the first time anything reaches that instance — through its
-daemon or through the shim. This tool never writes them.
+daemon or through a shell the hook has pointed at it. This tool never writes
+them.
 
 ### Reads, never modifies
 
@@ -114,8 +114,67 @@ tool adds an `instance` key to it rather than introducing a second marker file.
 - **Your dotfiles.** `install.sh` scans `~/.bashrc`, `~/.profile`,
   `~/.zshrc`, `~/.zshenv` and `~/.config/environment.d/*.conf` for
   `ENGRAM_CLOUD_*` exports and **stops with instructions** if it finds any. It
-  never edits them.
+  never edits them — including the line that loads the shell hook (see
+  [Shell integration](#shell-integration)): the installer prints it, you add
+  it.
 - **Engram's source.** No patch, no fork, no rebuild.
+
+## Shell integration
+
+Routing is not a binary on PATH. `install.sh` never installs anything named
+`engram`; instead it prints one line for you to add to your shell's rc file:
+
+```sh
+eval "$(engram-router hook bash)"   # ~/.bashrc
+eval "$(engram-router hook zsh)"    # ~/.zshrc
+```
+
+That line defines two things in the interactive shell that sources it:
+
+- A directory-change hook (`PROMPT_COMMAND` in bash, `chpwd` in zsh) that
+  resolves `$PWD` the same way `engram-router resolve` does, caching on
+  `$PWD` so it costs nothing between commands in the same directory. When a
+  rule or an `.engram/config.json` override matches, it `export`s
+  `ENGRAM_DATA_DIR` to that instance's data directory; when nothing matches,
+  it `unset`s it.
+- An `engram` shell **function** that refuses `sync`/`cloud` while the
+  current directory is unresolved (the same fail-closed message the old shim
+  gave) and otherwise runs `command engram "$@"`.
+
+Every process that shell starts inherits its exported environment, including
+the `engram mcp` server your agent spawns — Engram's own plugin template
+spawns it with `stdio: 'inherit'` and no `env` of its own, so it picks up
+whatever `ENGRAM_DATA_DIR` the hook last set. Nothing named `engram` is ever
+installed, so nothing competes with Homebrew's binary or with what gentle-ai
+manages.
+
+The `engram` function is never `export -f`'d, so it stays invisible to every
+other process: `command -v engram` from any program — including `gentle-ai
+update`, `upgrade` and `doctor`, which is why they work again — still finds
+the real, Homebrew-installed binary.
+
+### What this does not cover
+
+- **Desktop-launched agents.** A process your desktop environment starts
+  directly (not from a shell that sourced the hook) inherits no shell
+  environment, so it is not routed and lands in Engram's default `~/.engram`
+  — exactly as before. Turning `~/.engram` into a cloud-less quarantine
+  instance so this fails closed too is recorded as future work, not done.
+- **The `$PWD` cache.** The hook only re-resolves on a directory change. If
+  you edit `router.json` while parked inside a repository, that shell keeps
+  the old `ENGRAM_DATA_DIR` until you `cd` out and back in, or open a new
+  shell.
+- **Unhooked shells.** `engram` typed in a shell that never sourced the hook
+  line is not routed at all — it is just the real binary, unresolved.
+
+### Upgrading from an install that used the PATH shim
+
+Re-run `./install.sh`: it retires `~/.local/bin/engram` for you, but only if
+it still carries the `engram-router-shim` marker; anything else found there
+is left alone and reported. Add the `eval` line above to your rc file, open a
+new terminal, and run `engram-doctor` — it now also checks that nothing
+shadows `engram` in PATH and that the hook is actually loaded in the
+directory you run it from.
 
 ## The environment hazard
 
@@ -147,8 +206,9 @@ The installer is interactive and idempotent. For each instance it asks, in
 order, for a name, the directory that will hold its database, the namespaces
 whose repositories should use it, and then its server URL and token. Every
 prompt states the accepted format and how to skip it. It finishes by verifying
-that the shim wins in `PATH`, reading the configuration it just wrote back with
-the router's own parser, and running the doctor.
+that nothing shadows `engram` in `PATH`, printing the shell-hook line for your
+shell (see [Shell integration](#shell-integration)), reading the configuration
+it just wrote back with the router's own parser, and running the doctor.
 
 Get your token from your cloud's dashboard (`/dashboard/admin/users`). Tokens
 are per person; this repository ships none. Credentials go into that instance's
@@ -264,7 +324,7 @@ pushing**, enrolls only once the data is there, pushes, unenrolls the source
 last, and deletes the exported chunks.
 
 Every call runs with `ENGRAM_CLOUD_*` stripped and reaches the real binary
-directly, so neither a polluted environment nor the shim can redirect a
+directly, so neither a polluted environment nor the shell hook can redirect a
 migration in progress.
 
 If any step fails, nothing after it runs: the source keeps its memories and its
@@ -287,9 +347,10 @@ Two things it deliberately does not do. It does not delete the source memories
 what a previous cloud already received; that is your decision, not a routing
 one.
 
-**Run it before adding a routing rule for that repository.** The shim exports
-`ENGRAM_DATA_DIR` unconditionally, so once a rule sends the repo to the
-destination there is no way to export from the source.
+**Run it before adding a routing rule for that repository.** The hook exports
+`ENGRAM_DATA_DIR` unconditionally once a rule matches, so once a rule sends
+the repo to the destination there is no way to export from the source
+through a routed shell.
 
 ### Never commit exported chunks
 
@@ -314,7 +375,7 @@ happened once here, over a key name in `cloud.json`.
 
 Everything else is on firmer ground. `ENGRAM_DATA_DIR` is documented in
 `engram --help`, and `cloud enroll`, `cloud unenroll`, `cloud status` and
-`sync --import` are public subcommands. The shim and the routing depend on
+`sync --import` are public subcommands. The hook and the routing depend on
 none of it: they set `ENGRAM_DATA_DIR` and exec the real binary.
 
 After upgrading Engram, run the contract tests:
@@ -331,7 +392,7 @@ and the `observations` columns the counts rely on. Each failure names a
 behaviour that was verified once and has changed since.
 
 Everything they create lives in a temporary directory and the real binary is
-resolved directly, so the shim cannot redirect them and no configured instance
+resolved directly, so the hook cannot redirect them and no configured instance
 is read or written.
 
 `tests/test_router.sh` is the other half: it covers this tool's own logic with
@@ -366,11 +427,15 @@ instance from a defaulted one.
 ## Not supported
 
 **Windows.** Engram itself ships native Windows binaries, so the engine is not
-the obstacle — this tool is. A shim cannot be a file without an extension there,
-since PATH resolves through `PATHEXT`, and it is unclear whether a `.cmd` would
-resolve in a `CreateProcess` call without a shell, which is how an MCP client
-spawns it. Worse, `chmod 0600` is a silent no-op on Windows, so the protection
-on `cloud.json` would appear to be applied and would not be.
+the obstacle — this tool is, though the reason changed once routing moved
+from a PATH shim to a shell hook. A `.cmd`/`PATHEXT` shim is no longer the
+question; a PowerShell equivalent would need its own `$PROFILE` hook (a
+`Set-Location`/prompt wrapper) that exports `ENGRAM_DATA_DIR` the same way,
+and no such hook has been written or tested. It would face the same
+desktop-launch gap documented under [Shell integration](#shell-integration):
+an MCP client started outside a profile-loading shell inherits nothing.
+`chmod 0600` is still a silent no-op on Windows, so the protection on
+`cloud.json` would appear to be applied and would not be.
 
 Porting it would mean a second implementation that has to behave identically
 forever. If it is ever done, the core belongs in Go rather than PowerShell:

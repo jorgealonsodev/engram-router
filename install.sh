@@ -117,6 +117,45 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Step 1b — retire a leftover PATH shim from an earlier install. Routing now
+# happens through the shell hook (engram-router hook <shell>), not through a
+# binary named "engram" on PATH. Only a file carrying the engram-router-shim
+# marker is ever removed here; a real binary or any other foreign file at
+# $PREFIX_BIN/engram is left untouched, exactly as the feature spec requires.
+# ---------------------------------------------------------------------------
+retire_legacy_shim() {
+    local shim="$PREFIX_BIN/engram"
+
+    if [[ -L "$shim" ]]; then
+        section "Retirando el shim antiguo"
+        local target
+        target="$(readlink -f -- "$shim" 2>/dev/null || true)"
+        if [[ -n "$target" && -f "$target" ]] && grep -q 'engram-router-shim' "$target" 2>/dev/null; then
+            rm -f -- "$shim"
+            say "Retirado el enlace simbólico en $shim: apuntaba al shim antiguo; el destino no se toca."
+        else
+            say "AVISO: $shim es un enlace simbólico a un fichero ajeno; seguirá"
+            say "       ensombreciendo 'engram' en el PATH. Elimínelo a mano: rm $shim"
+        fi
+        return 0
+    fi
+
+    [[ -f "$shim" ]] || return 0
+
+    if grep -q 'engram-router-shim' "$shim" 2>/dev/null; then
+        section "Retirando el shim antiguo"
+        rm -f -- "$shim"
+        say "Retirado el shim antiguo en $shim: ya no hace falta, el enrutado lo"
+        say "hace ahora el hook de shell (engram-router hook <shell>)."
+    else
+        section "Retirando el shim antiguo"
+        say "AVISO: hay un fichero en $shim que no es nuestro (no lleva la marca"
+        say "       'engram-router-shim'). Se deja sin tocar; seguirá ensombreciendo"
+        say "       'engram' en el PATH mientras exista ahí."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Step 2 — install the router files (idempotent: code is always refreshed,
 # user data such as cloud.json and router.json is left alone if present).
 # ---------------------------------------------------------------------------
@@ -125,7 +164,6 @@ install_files() {
 
     mkdir -p "$PREFIX_BIN" "$LIB_DIR" "$CONFIG_DIR" "$INSTANCES_ENV_DIR"
 
-    install -m 0755 "$SCRIPT_DIR/bin/engram" "$PREFIX_BIN/engram"
     install -m 0755 "$SCRIPT_DIR/bin/engram-router" "$PREFIX_BIN/engram-router"
     install -m 0755 "$SCRIPT_DIR/bin/engram-doctor" "$PREFIX_BIN/engram-doctor"
     install -m 0755 "$SCRIPT_DIR/bin/engram-migrate" "$PREFIX_BIN/engram-migrate"
@@ -859,32 +897,75 @@ write_router_config() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6 — verify the shim actually wins in PATH.
+# Step 6 — verify nothing shadows the real "engram" binary. There is no PATH
+# shim to win anymore, so this only checks that no *retired* shim (a file
+# still carrying the engram-router-shim marker) is left ahead of the real
+# binary on PATH.
 # ---------------------------------------------------------------------------
-verify_path_precedence() {
-    section "Verificando precedencia en PATH"
+verify_no_shadowing() {
+    section "Verificando que nada ensombrece 'engram'"
     local resolved
     resolved="$(command -v engram 2>/dev/null || true)"
-    if [[ "$resolved" == "$PREFIX_BIN/engram" ]]; then
-        say "OK: 'engram' resuelve al shim instalado ($resolved)."
-        return 0
+
+    if [[ -z "$resolved" ]]; then
+        say "AVISO: no se encontró el binario real 'engram' en PATH."
+        say "       Instale/añada engram al PATH y vuelva a ejecutar este instalador."
+        return 1
     fi
 
-    say "AVISO: 'engram' resuelve a: ${resolved:-"(no encontrado)"}"
-    say "       en vez de al shim instalado en $PREFIX_BIN/engram."
+    if grep -q 'engram-router-shim' "$resolved" 2>/dev/null; then
+        say "FALLO: un shim retirado sigue en PATH; vuelva a ejecutar el"
+        say "       instalador o elimínelo."
+        say "       resuelto: $resolved"
+        return 1
+    fi
+
+    say "OK: 'engram' resuelve al binario real: $resolved; nada lo ensombrece."
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Step 7 — print the shell-hook line for the user's shell. install.sh never
+# edits dotfiles (see the header comment), so the line is printed for the
+# person to add by hand, chosen from $SHELL when it names a known shell and
+# both otherwise.
+# ---------------------------------------------------------------------------
+print_hook_instructions() {
+    section "Integración con la shell"
+    say "El enrutado ya no depende de ningún binario en PATH: ahora lo hace un"
+    say "hook de shell que exporta ENGRAM_DATA_DIR según el directorio actual,"
+    say "y que heredan también los procesos MCP que la shell lance."
     say ""
-    say "Cómo solucionarlo: añada $PREFIX_BIN al PATH ANTES que cualquier otra"
-    say "ruta que ya contenga 'engram' (por ejemplo, antes de la línea que añade"
-    say "Homebrew al PATH). En ~/.bashrc y ~/.profile:"
-    say "  export PATH=\"$PREFIX_BIN:\$PATH\""
-    say "Luego abra una terminal nueva y vuelva a ejecutar: engram-doctor"
-    return 1
+
+    local shell_name
+    shell_name="$(basename "${SHELL:-}")"
+
+    case "$shell_name" in
+        bash)
+            say "Añada esta línea a ~/.bashrc:"
+            say "  eval \"\$(engram-router hook bash)\""
+            ;;
+        zsh)
+            say "Añada esta línea a ~/.zshrc:"
+            say "  eval \"\$(engram-router hook zsh)\""
+            ;;
+        *)
+            say "No se ha reconocido \$SHELL (${SHELL:-sin definir}). Añada la línea"
+            say "que corresponda a su shell:"
+            say "  bash (~/.bashrc): eval \"\$(engram-router hook bash)\""
+            say "  zsh  (~/.zshrc):  eval \"\$(engram-router hook zsh)\""
+            ;;
+    esac
+
+    say ""
+    say "Después, abra una terminal nueva y ejecute: engram-doctor"
 }
 
 main() {
     say "Instalador del router multi-nube de Engram"
 
     detect_hazardous_exports
+    retire_legacy_shim
     install_files
     install_systemd_unit
     ask_instances
@@ -921,17 +1002,19 @@ main() {
     say "pendientes que son 'destination-blind' (sin saber a qué servidor"
     say "pertenecen). Revíselas antes de habilitar sync en varias instancias."
 
-    local path_ok=1
-    verify_path_precedence || path_ok=0
+    local shadow_ok=1
+    verify_no_shadowing || shadow_ok=0
+
+    print_hook_instructions
 
     section "Ejecutando engram-doctor"
     "$PREFIX_BIN/engram-doctor" || true
 
     echo
-    if [[ $path_ok -eq 1 ]]; then
+    if [[ $shadow_ok -eq 1 ]]; then
         say "Instalación completa."
     else
-        say "Instalación completa, PERO revise el aviso de precedencia en PATH de arriba."
+        say "Instalación completa, PERO revise el aviso de arriba: algo sigue ensombreciendo 'engram'."
     fi
 }
 

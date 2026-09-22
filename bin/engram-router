@@ -4,9 +4,10 @@
 # symlink, or the "where"/"explain" subcommand).
 #
 # Usage:
-#   engram-router resolve [PATH]   machine-readable KEY=VALUE routing facts
-#   engram-router where   [PATH]   human-readable (Spanish) routing summary
-#   engram-router explain [PATH]   alias for "where"
+#   engram-router resolve [PATH]     machine-readable KEY=VALUE routing facts
+#   engram-router where   [PATH]     human-readable (Spanish) routing summary
+#   engram-router explain [PATH]     alias for "where"
+#   engram-router hook <bash|zsh>    prints shell integration for `eval`
 #
 # Invoked as "engram-where" (e.g. via a symlink), it behaves as "where" by
 # default, with no subcommand needed.
@@ -117,6 +118,180 @@ cmd_where() {
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# hook: shell integration, meant to be `eval`'d by the user's rc file
+# (`eval "$(engram-router hook bash)"`). Never touches a dotfile itself —
+# per the feature's install.sh convention, the user adds the eval line.
+#
+# The emitted code:
+#   - resolves ENGRAM_DATA_DIR per directory on every prompt (bash) / chpwd
+#     (zsh), caching on $PWD so it never pays a subprocess+git per command;
+#   - defines a shell FUNCTION named "engram" (never `export -f`'d, so it is
+#     invisible to child processes/exec.LookPath) that refuses cloud
+#     operations (sync, cloud — the same set as router_is_cloud_op) while
+#     the current directory is unresolved, and otherwise runs the real
+#     binary via `command engram`.
+#
+# It never sources lib/router.sh into the user's shell: routing logic stays
+# in this binary, invoked as a subprocess, so the two never drift apart.
+# ---------------------------------------------------------------------------
+
+cmd_hook() {
+    local shell="${1:-}"
+    case "$shell" in
+        bash|zsh) ;;
+        *)
+            echo "engram-router: uso: engram-router hook <bash|zsh>" >&2
+            exit 2
+            ;;
+    esac
+
+    local self_path
+    self_path="$(_self_dir)/$(basename "${BASH_SOURCE[0]}")"
+
+    case "$shell" in
+        bash) _emit_hook_bash "$self_path" ;;
+        zsh)  _emit_hook_zsh "$self_path" ;;
+    esac
+}
+
+# _hook_resolver_block
+# The $PWD-cached resolver, identical for bash and zsh (both understand
+# `local`, `[[ ]]`, `<<<`, and C-style `read`). Emitted verbatim into both
+# hook variants so the two can never drift apart.
+_hook_resolver_block() {
+    cat <<'HOOK'
+_ENGRAM_ROUTER_BIN="$(command -v engram-router 2>/dev/null || printf '%s' "$_ENGRAM_ROUTER_BIN_FALLBACK")"
+unset _ENGRAM_ROUTER_BIN_FALLBACK
+_ENGRAM_ROUTER_LAST_PWD=""
+_ENGRAM_ROUTER_RESOLVED=0
+
+_engram_router_hook() {
+    [[ "$PWD" == "$_ENGRAM_ROUTER_LAST_PWD" ]] && return 0
+    _ENGRAM_ROUTER_LAST_PWD="$PWD"
+
+    local out rc instance="" data_dir="" key value
+    out="$("$_ENGRAM_ROUTER_BIN" resolve "$PWD" 2>/dev/null)"
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                INSTANCE) instance="$value" ;;
+                DATA_DIR) data_dir="$value" ;;
+            esac
+        done <<<"$out"
+    fi
+
+    if [[ -n "$instance" && -n "$data_dir" ]]; then
+        export ENGRAM_DATA_DIR="$data_dir"
+        _ENGRAM_ROUTER_RESOLVED=1
+    else
+        unset ENGRAM_DATA_DIR
+        _ENGRAM_ROUTER_RESOLVED=0
+    fi
+}
+HOOK
+}
+
+# _hook_engram_function_block
+# The "engram" wrapper function plus the initial hook run, identical for
+# bash and zsh. Reuses bin/engram's own Spanish refusal wording. The
+# refusal's heredoc is intentionally unquoted (<<EOF, not <<'EOF'): it must
+# expand $PWD and $ENGRAM_ROUTER_CONFIG at refusal time in the user's shell,
+# not at generation time here.
+_hook_engram_function_block() {
+    cat <<'HOOK'
+
+engram() {
+    if [[ "${_ENGRAM_ROUTER_RESOLVED:-0}" != "1" ]]; then
+        case "${1:-}" in
+            sync|cloud)
+                cat >&2 <<EOF
+engram: operación de nube rechazada — este repositorio no está enrutado a
+ninguna instancia de Engram.
+
+  repo: $PWD
+
+Esto ocurre porque no hay una regla de enrutamiento que coincida con el
+remoto de este repositorio (o el repositorio no tiene remoto), y tampoco
+hay un override "instance" en .engram/config.json.
+
+Cómo resolverlo:
+  1. Añade una regla en ${ENGRAM_ROUTER_CONFIG:-$HOME/.config/engram-router/router.json}
+     que cubra el host/propietario de este remoto, o
+  2. Añade "instance": "<nombre>" a .engram/config.json de este repositorio.
+
+Las operaciones locales de engram siguen funcionando con normalidad; solo
+se rechazan las operaciones de nube (sync, cloud ...) para evitar
+replicar datos al servidor equivocado.
+EOF
+                return 1
+                ;;
+        esac
+    fi
+    command engram "$@"
+}
+
+_engram_router_hook
+HOOK
+}
+
+# _emit_hook_bash SELF_PATH
+# SELF_PATH is embedded (bash-quoted, via printf %q) as the fallback used at
+# eval time when "command -v engram-router" finds nothing on PATH — this is
+# what lets a test point the hook at a checkout's bin/engram-router without
+# installing it.
+_emit_hook_bash() {
+    local self_path="$1"
+    printf '_ENGRAM_ROUTER_BIN_FALLBACK=%q\n' "$self_path"
+    cat <<'HOOK'
+# engram-router shell hook (bash). Resolves ENGRAM_DATA_DIR per directory
+# and defines a shell function "engram" that refuses unresolved cloud
+# operations. This function is never `export -f`'d: it stays invisible to
+# other processes, so it never shadows the real "engram" binary on PATH.
+
+HOOK
+    _hook_resolver_block
+    cat <<'HOOK'
+
+case ";${PROMPT_COMMAND:-};" in
+    *";_engram_router_hook;"*) ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}_engram_router_hook" ;;
+esac
+HOOK
+    _hook_engram_function_block
+}
+
+# _emit_hook_zsh SELF_PATH
+# Same contract as _emit_hook_bash, for zsh. Registers via add-zsh-hook when
+# available, falling back to appending to chpwd_functions (deduplicated) so
+# re-sourcing the hook (e.g. `source ~/.zshrc` twice) never double-fires it.
+_emit_hook_zsh() {
+    local self_path="$1"
+    printf '_ENGRAM_ROUTER_BIN_FALLBACK=%q\n' "$self_path"
+    cat <<'HOOK'
+# engram-router shell hook (zsh). Resolves ENGRAM_DATA_DIR per directory
+# and defines a shell function "engram" that refuses unresolved cloud
+# operations. This function is never exported: it stays invisible to other
+# processes, so it never shadows the real "engram" binary on PATH.
+
+HOOK
+    _hook_resolver_block
+    cat <<'HOOK'
+
+autoload -Uz add-zsh-hook 2>/dev/null
+if typeset -f add-zsh-hook >/dev/null 2>&1; then
+    add-zsh-hook chpwd _engram_router_hook
+else
+    typeset -ga chpwd_functions
+    if [[ -z "${chpwd_functions[(r)_engram_router_hook]}" ]]; then
+        chpwd_functions+=(_engram_router_hook)
+    fi
+fi
+HOOK
+    _hook_engram_function_block
+}
+
 main() {
     local sub="${1:-}"
     case "$sub" in
@@ -127,6 +302,10 @@ main() {
         where|explain)
             shift
             cmd_where "$@"
+            ;;
+        hook)
+            shift
+            cmd_hook "$@"
             ;;
         *)
             # No recognized subcommand: this is either "engram-where" (which
