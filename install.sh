@@ -480,17 +480,17 @@ _write_env_kv_body() {
         while IFS= read -r line || [[ -n "$line" ]]; do
             if [[ "$line" == "$key="* ]]; then
                 if [[ $replaced -eq 0 ]]; then
-                    printf '%s\n' "$key=$value"
+                    printf '%s\n' "$key=$value" || return 1
                     replaced=1
                 fi
                 # else: drop a duplicate/pre-existing extra KEY= line
             else
-                printf '%s\n' "$line"
+                printf '%s\n' "$line" || return 1
             fi
         done < "$env_file"
     fi
     if [[ $replaced -eq 0 ]]; then
-        printf '%s\n' "$key=$value"
+        printf '%s\n' "$key=$value" || return 1
     fi
     return 0
 }
@@ -555,6 +555,23 @@ write_instance_data_dir_env() {
     mkdir -p "$INSTANCES_ENV_DIR"
     [[ -e "$env_file" ]] || : > "$env_file"
     _write_env_kv "$env_file" "ENGRAM_DATA_DIR" "$dir"
+}
+
+# _instance_effective_data_dir NAME -> data dir the daemon actually serves
+# now: NAME's env ENGRAM_DATA_DIR if present, else the unit's name-derived
+# default. Detects a repoint away from a directory that still holds data.
+_instance_effective_data_dir() {
+    local name="$1" env_file="$INSTANCES_ENV_DIR/$name.env" cur=""
+    [[ -r "$env_file" ]] && cur="$(sed -n 's/^ENGRAM_DATA_DIR=//p' "$env_file" | tail -n1)"
+    printf '%s\n' "${cur:-$HOME/.local/share/engram-$name}"
+}
+
+# _load_router_expand_path -> sources lib/router.sh and, via exit status,
+# reports whether router_expand_path actually got defined: sourcing can
+# "succeed" while leaving it undefined (a corrupted/partial router.sh).
+_load_router_expand_path() {
+    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh" 2>/dev/null || true
+    declare -F router_expand_path >/dev/null
 }
 
 read_new_name() {
@@ -1081,12 +1098,36 @@ main() {
     # already-absolute path (no leading "$HOME"/"~" token), so expanding an
     # already-expanded dir here — the freshly-typed/default case — is a
     # no-op.
-    # shellcheck source=lib/router.sh
-    source "$LIB_DIR/router.sh" 2>/dev/null || source "$SCRIPT_DIR/lib/router.sh"
+    local router_lib_ok=1 new_dir eff_dir
+    local -a skipped_data_dirs=()
+    _load_router_expand_path || router_lib_ok=0
+    if [[ $router_lib_ok -eq 0 ]]; then
+        say ""
+        say "AVISO: no se pudo cargar lib/router.sh (router_expand_path no está"
+        say "definida). No se escribirá ENGRAM_DATA_DIR esta vez; revise esa"
+        say "librería y vuelva a ejecutar el instalador."
+    fi
     for idx in "${!INSTANCES_TO_PROVISION[@]}"; do
-        write_instance_port_env "${INSTANCES_TO_PROVISION[$idx]}" "${INSTANCE_PORTS[$idx]}"
-        write_instance_data_dir_env "${INSTANCES_TO_PROVISION[$idx]}" "$(router_expand_path "${INSTANCE_DIRS[$idx]}")"
+        name="${INSTANCES_TO_PROVISION[$idx]}"
+        write_instance_port_env "$name" "${INSTANCE_PORTS[$idx]}"
+        [[ $router_lib_ok -eq 1 ]] || continue
+        new_dir="$(router_expand_path "${INSTANCE_DIRS[$idx]}")"
+        eff_dir="$(_instance_effective_data_dir "$name")"
+        if [[ "$eff_dir" != "$new_dir" && -f "$eff_dir/engram.db" ]]; then
+            skipped_data_dirs+=("$name")
+            say ""
+            say "AVISO: '$name' sigue sirviendo datos reales en $eff_dir; la"
+            say "configuración apunta ahora a $new_dir. No se ha tocado su"
+            say "ENGRAM_DATA_DIR. Use engram-migrate, o corrija router.json."
+        else
+            write_instance_data_dir_env "$name" "$new_dir"
+        fi
     done
+    if [[ ${#skipped_data_dirs[@]} -gt 0 ]]; then
+        say ""
+        say "RESUMEN: ENGRAM_DATA_DIR sin tocar para: ${skipped_data_dirs[*]}"
+        say "(vea los avisos de arriba antes de continuar)."
+    fi
 
     section "Aviso final"
     say "Si ya tenía una instalación de Engram de instancia única en uso, es"

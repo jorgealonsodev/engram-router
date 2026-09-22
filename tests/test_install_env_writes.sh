@@ -45,6 +45,10 @@ assert_eq() {  # label expected actual
     if [[ "$2" == "$3" ]]; then _pass "$1"
     else _fail "$1" "expected '$2', got '$3'"; fi
 }
+assert_match() {  # label substring text
+    if [[ "$3" == *"$2"* ]]; then _pass "$1"
+    else _fail "$1" "'$2' not found in: $3"; fi
+}
 
 # ---------------------------------------------------------------------------
 # Real $HOME safety net — see tests/test_install_port.sh for the rationale.
@@ -300,6 +304,86 @@ fi
 chmod 0755 "$instances_dir"
 assert_eq "failed-write: env file is left byte-identical after a failed write" \
     "$original_content" "$(cat "$env_i" 2>/dev/null)"
+
+# F1: a write that fails mid-stream must be observable (see _write_env_kv_body).
+echo
+echo "== F1: a write that fails mid-stream (ulimit -f) reports failure and leaves the env file untouched =="
+home_j="$(new_fixture_home home_j)"
+env_j="$(env_file_for "$home_j" work)"; mkdir -p "$(dirname "$env_j")"
+orig_j=$'ENGRAM_PORT=6666\nENGRAM_CLOUD_AUTOSYNC=true'
+printf '%s\n' "$orig_j" > "$env_j"
+big_j="$(printf 'x%.0s' $(seq 1 4000))"
+(
+    export HOME="$home_j" ENGRAM_ROUTER_BIN="$home_j/.local/bin" \
+        ENGRAM_ROUTER_LIB_DIR="$home_j/.local/lib/engram-router" \
+        ENGRAM_ROUTER_CONFIG_DIR="$home_j/.config/engram-router"
+    source "$ROOT_DIR/install.sh"
+    trap '' XFSZ; ulimit -c 0; ulimit -f 1   # graceful EFBIG, not a SIGXFSZ kill
+    write_instance_data_dir_env work "$big_j"
+)
+[[ $? -ne 0 ]] && _pass "F1: write reports failure on a mid-stream write error" \
+    || _fail "F1: write reports failure on a mid-stream write error" "rc=0"
+assert_eq "F1: env file left byte-identical after the failed write" "$orig_j" "$(cat "$env_j" 2>/dev/null)"
+
+# F2: main()'s final loop must verify router_expand_path is actually defined,
+# not trust source's own exit status (see _load_router_expand_path).
+echo
+echo "== F2: router.sh present -> succeeds; absent in both locations -> fails closed, no crash =="
+home_k="$(new_fixture_home home_k)"
+call_env_fn "$home_k" _load_router_expand_path 2>/dev/null \
+    && _pass "F2: library present, router_expand_path becomes available" \
+    || _fail "F2: library present, router_expand_path becomes available" "reported unavailable"
+home_l="$(new_fixture_home home_l)"
+cp "$ROOT_DIR/install.sh" "$home_l/install.sh"
+( export HOME="$home_l" ENGRAM_ROUTER_LIB_DIR="$home_l/nope" \
+      ENGRAM_ROUTER_CONFIG_DIR="$home_l/.config/engram-router"
+  source "$home_l/install.sh"; _load_router_expand_path ) 2>/dev/null \
+    && _fail "F2: library absent, router_expand_path stays unavailable" "reported available" \
+    || _pass "F2: library absent, router_expand_path stays unavailable"
+
+# F3: an instance already serving real data at its effective dir must not be
+# silently repointed (see _instance_effective_data_dir).
+_f3_router_json() { cat > "$1/.config/engram-router/router.json" <<JSON
+{"rules": [], "instances": {"work": {"data_dir": "$2", "port": 7437}}}
+JSON
+}
+
+echo
+echo "== F3(a): old effective dir has engram.db; router.json points elsewhere -> NOT rewritten, warning names both paths =="
+home_m="$(new_fixture_home home_m)"
+mkdir -p "$home_m/.config/engram-router" "$home_m/.local/share/engram-work"
+: > "$home_m/.local/share/engram-work/engram.db"
+target_m="$home_m/.other/place"
+_f3_router_json "$home_m" "$target_m"
+out_m="$(run_install "$home_m" </dev/null 2>&1)"
+assert_eq "F3a: ENGRAM_DATA_DIR is NOT rewritten" \
+    "" "$(grep '^ENGRAM_DATA_DIR=' "$(env_file_for "$home_m" work)" 2>/dev/null)"
+assert_match "F3a: warning names the old path" "$home_m/.local/share/engram-work" "$out_m"
+assert_match "F3a: warning names the new path" "$target_m" "$out_m"
+
+echo
+echo "== F3(b): old effective dir has NO engram.db -> rewritten normally, no warning =="
+home_n="$(new_fixture_home home_n)"
+mkdir -p "$home_n/.config/engram-router"
+target_n="$home_n/.other/place"
+_f3_router_json "$home_n" "$target_n"
+out_n="$(run_install "$home_n" </dev/null 2>&1)"
+assert_eq "F3b: ENGRAM_DATA_DIR IS rewritten" \
+    "ENGRAM_DATA_DIR=$target_n" "$(grep '^ENGRAM_DATA_DIR=' "$(env_file_for "$home_n" work)" 2>/dev/null)"
+assert_eq "F3b: no skip warning" "0" "$(grep -c 'sin tocar' <<<"$out_n")"
+
+echo
+echo "== F3(c): env already has the effective value -> unchanged, no warning =="
+home_o="$(new_fixture_home home_o)"
+same_dir="$home_o/.local/share/engram-work"
+mkdir -p "$home_o/.config/engram-router/instances" "$same_dir"
+: > "$same_dir/engram.db"
+printf 'ENGRAM_DATA_DIR=%s\nENGRAM_PORT=7437\n' "$same_dir" > "$(env_file_for "$home_o" work)"
+_f3_router_json "$home_o" "$same_dir"
+out_o="$(run_install "$home_o" </dev/null 2>&1)"
+assert_eq "F3c: ENGRAM_DATA_DIR unchanged" \
+    "ENGRAM_DATA_DIR=$same_dir" "$(grep '^ENGRAM_DATA_DIR=' "$(env_file_for "$home_o" work)" 2>/dev/null)"
+assert_eq "F3c: no skip warning" "0" "$(grep -c 'sin tocar' <<<"$out_o")"
 
 echo
 echo "== real \$HOME is untouched =="
