@@ -83,6 +83,7 @@ noisy and recoverable, instead of *wrong sync*, which is silent and permanent.
 | `~/.local/bin/engram-router` | resolution and explanation | 0755 |
 | `~/.local/bin/engram-doctor` | read-only diagnostics | 0755 |
 | `~/.local/bin/engram-migrate` | moves a project between instances | 0755 |
+| `~/.local/bin/engram-status` | read-only sync state, per instance | 0755 |
 | `~/.local/bin/engram-where` | symlink to `engram-router` | — |
 | `~/.local/lib/engram-router/router.sh` | shared library | 0644 |
 | `~/.config/engram-router/router.json` | your routing rules | 0644 |
@@ -416,9 +417,26 @@ before trusting a migration.
 
 ```sh
 engram-where     # where does THIS repository sync, and why
+engram-status    # is it actually syncing, to which cloud, and what is stuck
 engram-doctor    # environment, PATH, destinations, daemons; non-zero on failure
 engram-migrate   # move a repository's memories between instances
 ```
+
+`engram-doctor` and `engram-status` answer different questions. The doctor
+checks whether the installation is *correct*: versions, PATH, the hook, file
+modes, whether each daemon is running. `engram-status` checks whether it is
+*working*: which cloud each instance points at, how far its queue is behind,
+and which projects are holding mutations back. An install can be perfectly
+healthy by the doctor and not have pushed anything for a week.
+
+`engram-status` is read-only by construction — every database is opened
+`mode=ro` — and it never prints a token, only whether one is present. It exits
+non-zero when any instance is degraded or unreadable, so it works in a cron
+job or a prompt. `--json` emits the same facts for scripting.
+
+The line that repays the tool is the enrolled-project count. Enabling autosync
+on an instance **enrols every project it is still holding**, so one flag can
+start a bulk upload; that count is where you see it happen.
 
 `engram-router resolve` prints the same resolution as `engram-where` in
 `KEY=value` lines, for scripting:
