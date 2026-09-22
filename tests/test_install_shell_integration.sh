@@ -234,6 +234,83 @@ assert_eq "unwritable dir: rc file left byte-identical" "export FOO=bar" "$(cat 
 assert_eq "unwritable dir: no leftover temp file" "" "$(find "$H9" -maxdepth 1 -name '*.engram-router.*' 2>/dev/null)"
 
 # ===========================================================================
+# 7c) $rc_file is a symlink to a writable target elsewhere (Nix/home-manager/
+#     chezmoi/stow layout): the symlink itself must never be replaced by the
+#     atomic mv — only its target gets the marker block.
+# ===========================================================================
+echo
+echo "== answer 's' with ~/.bashrc as a symlink to a writable target =="
+Ha="$(new_fixture)"
+mkdir -p "$Ha/real"
+printf '# original real target\nexport BAR=baz\n' > "$Ha/real/target.sh"
+ln -s "$Ha/real/target.sh" "$Ha/.bashrc"
+link_before_a="$(readlink "$Ha/.bashrc")"
+orig_target_a="$(cat "$Ha/real/target.sh")"
+outA="$(run_offer "$Ha" /bin/bash "s")"
+if [[ -L "$Ha/.bashrc" ]]; then _pass "symlink: ~/.bashrc is still a symlink after 's'"
+else _fail "symlink: ~/.bashrc is still a symlink after 's'" "became: $(cat "$Ha/.bashrc" 2>/dev/null)"; fi
+assert_eq "symlink: still points at the same target" "$link_before_a" "$(readlink "$Ha/.bashrc" 2>/dev/null)"
+new_target_a="$(cat "$Ha/real/target.sh" 2>/dev/null || true)"
+if [[ "$new_target_a" == "$orig_target_a"* ]]; then
+    _pass "symlink: target's original content is preserved as a prefix"
+else
+    _fail "symlink: target's original content is preserved as a prefix" "got: $new_target_a"
+fi
+marker_count_a="$(grep -c 'engram-router hook bash' "$Ha/real/target.sh" 2>/dev/null || true)"
+assert_eq "symlink: marker/eval line appears exactly once in the target" "1" "${marker_count_a:-0}"
+backup_a="$(ls "$Ha"/real/target.sh.bak-engram-router-* 2>/dev/null | head -n1)"
+if [[ -n "$backup_a" ]]; then
+    _pass "symlink: backup sits next to the target"
+    assert_eq "symlink: backup equals the original target content" "$orig_target_a" "$(cat "$backup_a")"
+else
+    _fail "symlink: backup sits next to the target" "none found"
+    _fail "symlink: backup equals the original target content" "no backup to compare"
+fi
+
+# ===========================================================================
+# 7d) $rc_file is a symlink to a read-only target in a read-only directory:
+#     must degrade exactly like the unwritable-dir case, and the symlink
+#     (and its target) must stay untouched.
+# ===========================================================================
+echo
+echo "== answer 's' with ~/.bashrc as a symlink to a read-only target =="
+Hb="$(new_fixture)"
+mkdir -p "$Hb/rodir"
+printf 'export RO=1\n' > "$Hb/rodir/target.sh"
+chmod 0444 "$Hb/rodir/target.sh"
+chmod 0555 "$Hb/rodir"
+ln -s "$Hb/rodir/target.sh" "$Hb/.bashrc"
+link_before_b="$(readlink "$Hb/.bashrc")"
+orig_target_b="$(cat "$Hb/rodir/target.sh")"
+outB="$(run_offer "$Hb" /bin/bash "s")"
+chmod 0755 "$Hb/rodir"
+assert_match "symlink to read-only target: degrades with the Spanish message" 'No se pudo añadir' "$outB"
+if [[ -L "$Hb/.bashrc" ]]; then _pass "symlink to read-only target: ~/.bashrc is still a symlink"
+else _fail "symlink to read-only target: ~/.bashrc is still a symlink" "became: $(cat "$Hb/.bashrc" 2>/dev/null)"; fi
+assert_eq "symlink to read-only target: still points at the same target" "$link_before_b" "$(readlink "$Hb/.bashrc" 2>/dev/null)"
+assert_eq "symlink to read-only target: target left byte-identical" "$orig_target_b" "$(cat "$Hb/rodir/target.sh")"
+
+# ===========================================================================
+# 7e) $rc_file is a dangling symlink (target's directory does not exist, so
+#     "readlink -f" yields nothing): must degrade without creating anything.
+# ===========================================================================
+echo
+echo "== answer 's' with ~/.bashrc as a dangling symlink =="
+Hc="$(new_fixture)"
+ln -s "$Hc/no-such-dir/target.sh" "$Hc/.bashrc"
+link_before_c="$(readlink "$Hc/.bashrc")"
+outC="$(run_offer "$Hc" /bin/bash "s")"
+assert_match "dangling symlink: degrades with the Spanish message" 'No se pudo añadir' "$outC"
+if [[ -L "$Hc/.bashrc" ]]; then _pass "dangling symlink: ~/.bashrc is still a symlink"
+else _fail "dangling symlink: ~/.bashrc is still a symlink" "became: $(cat "$Hc/.bashrc" 2>/dev/null)"; fi
+assert_eq "dangling symlink: still points at the same (missing) target" "$link_before_c" "$(readlink "$Hc/.bashrc" 2>/dev/null)"
+if [[ -e "$Hc/no-such-dir" ]]; then
+    _fail "dangling symlink: nothing is created" "found: $Hc/no-such-dir"
+else
+    _pass "dangling symlink: nothing is created"
+fi
+
+# ===========================================================================
 # 8) real $HOME is untouched.
 # ===========================================================================
 echo

@@ -983,15 +983,24 @@ offer_shell_integration() {
         s|S|si|Si|SI|sí|Sí|SÍ|y|Y|yes|Yes|YES)
             # Atomic (temp file + same-dir mv) and non-fatal: every risky
             # command stays left of "||", so set -e never aborts install.sh.
-            local backup="" tmp="" ok=1
-            if [[ -e "$rc_file" ]]; then
-                backup="${rc_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)"
-                if cp -p "$rc_file" "$backup"; then say "Copia de seguridad del archivo original: $backup"
+            # If $rc_file is a symlink (Nix/home-manager/chezmoi/stow layouts
+            # all manage dotfiles this way), resolve it and write through to
+            # the real target's own directory, so "mv" never replaces the
+            # symlink itself with a plain file.
+            local write_file="$rc_file" ok=1
+            if [[ -L "$rc_file" ]]; then
+                write_file="$(readlink -f -- "$rc_file" 2>/dev/null)" || write_file=""
+                [[ -z "$write_file" ]] && ok=0
+            fi
+            local backup="" tmp=""
+            if [[ $ok -eq 1 && -e "$write_file" ]]; then
+                backup="${write_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)"
+                if cp -p "$write_file" "$backup"; then say "Copia de seguridad del archivo original: $backup"
                 else backup=""; ok=0; fi
             fi
-            [[ $ok -eq 1 ]] && { tmp="$(mktemp "${rc_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
-            [[ $ok -eq 1 ]] && { { [[ -e "$rc_file" ]] && cat "$rc_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
-            [[ $ok -eq 1 ]] && { [[ -e "$rc_file" ]] && chmod --reference="$rc_file" "$tmp" 2>/dev/null; mv "$tmp" "$rc_file" || ok=0; }
+            [[ $ok -eq 1 ]] && { tmp="$(mktemp "${write_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
+            [[ $ok -eq 1 ]] && { { [[ -e "$write_file" ]] && cat "$write_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
+            [[ $ok -eq 1 ]] && { [[ -e "$write_file" ]] && chmod --reference="$write_file" "$tmp" 2>/dev/null; mv "$tmp" "$write_file" || ok=0; }
             if [[ $ok -eq 1 ]]; then say "Añadida la línea a $display_rc."
             else
                 rm -f "$tmp"
