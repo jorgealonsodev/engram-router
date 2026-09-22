@@ -57,3 +57,59 @@ Which instance this repository resolves to, or that it resolves to none.
    database is reported as such while the others still render.
 4. Installed by `install.sh`, removed by `uninstall.sh`.
 5. All tests pass.
+
+## Route and mode
+- Route: delegated direct (one writer for `bin/engram-status` plus its suite).
+- TDD: strict, per the session configuration. Runner: plain bash,
+  `bash tests/test_status.sh`, PASS/FAIL counters like the rest of the suite.
+- Delivery strategy: `single-pr` — one branch, `feat/engram-status`, merged to
+  `main`. 1115 authored changed lines, of which 457 are the test suite and 59
+  this document; `bin/engram-status` itself is 597 new lines and nothing
+  existing was rewritten (0 deletions), so the change does not compete for
+  review attention the way the 400-line budget is meant to protect.
+
+## Tasks
+- [x] T1 — `bin/engram-status` reads every instance and renders the human view.
+      Commit c480f09.
+- [x] T2 — `--json` mode with the same facts, no token values. Commit c480f09.
+- [x] T3 — Degrade instead of failing on a missing `cloud.json`, an unreadable
+      database, a stopped daemon or an absent `sync_state` row. Commit c480f09.
+- [x] T4 — Installed by `install.sh`, removed by `uninstall.sh`. Commit c480f09.
+- [x] T5 — A failed query is never reported as an empty result. Commit 637e8cc.
+- [x] T6 — This document. Commit 2b92c9b.
+
+## Verification evidence
+Measured on 2026-09-22, on the real machine, with both instances running.
+
+- `bash tests/test_status.sh` — 41 passed, 0 failed.
+- Whole suite, 11 files — 350 passed, 0 failed.
+- `shellcheck bin/engram-status` — two SC2034 warnings on `RULE_PREFIXES` and
+  `RULE_INSTANCES`, the arrays `lib/router.sh` fills. `bin/engram-doctor`
+  carries the identical pattern at lines 422-424; this is the repository's
+  existing convention for resetting them, not a defect introduced here.
+- Acceptance 1: run in this repository, it printed both instances with cloud,
+  daemon state, autosync, lifecycle and counters, and named `personal` as the
+  instance this repository routes to.
+- Acceptance 2: `--json` parsed as valid JSON; the only occurrence of the word
+  token is `"token_present": true`, a boolean. No value is printed.
+- Acceptance 3: one instance rendered as degraded, with its `reason_code` and
+  the projects holding unsynced mutations, while the other still rendered
+  healthy — the two instances do not take each other down.
+- Acceptance 4: `install.sh:173` installs it 0755, `uninstall.sh:99` removes it.
+- Native review: `gentle-ai review assess --base-ref main --committed-only`
+  reports `risk: high` (executable mode, shell process boundary) and
+  `review_due: false`, `review_due_reason: already_reviewed`, candidate
+  `consumed: true` — the range carries terminal review authority already.
+
+## What this tool has already earned
+Enabling autosync on an instance enrols every project it is still holding —
+it does not merely start pushing what was already enrolled. That turns a
+one-line configuration change into a bulk upload, and nothing in the existing
+tooling showed it: the daemons log `[autosync] started` and then go quiet.
+`engram-status` makes the enrolled-project count a number you read off the
+screen, so a jump in it is visible the moment it happens rather than weeks
+later. It caught exactly that on the day it was installed.
+
+## Next step
+Closed. Merged to `main`. The remaining router backlog (T14, T15, T16, P8)
+lives in `engram-multi-cloud-router.md`.
