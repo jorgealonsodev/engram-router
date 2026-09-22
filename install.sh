@@ -963,8 +963,34 @@ offer_shell_integration() {
         return
     fi
 
-    if [[ -f "$rc_file" ]] && grep -q 'engram-router hook' "$rc_file" 2>/dev/null; then
+    # Serialize the whole read-decide-write sequence (idempotency check
+    # through the final "mv" below) with an flock held on the rc file's
+    # directory, so two concurrent installs can't both see a pristine file
+    # and both append the block. We lock the *directory*, not a sibling
+    # lock file, so there is nothing to leak or clean up afterwards.
+    # flock may be missing on a minimal system: degrade to unlocked,
+    # best-effort behaviour rather than refusing to run — a lock failure
+    # must never abort the installer under set -e.
+    local lock_dir lock_fd=""
+    lock_dir="$(dirname -- "$rc_file")"
+    if command -v flock >/dev/null 2>&1; then
+        if exec {lock_fd}<"$lock_dir" 2>/dev/null; then
+            flock "$lock_fd" 2>/dev/null || true
+        else
+            lock_fd=""
+        fi
+    fi
+
+    # Anchored to an actually-loaded hook: an uncommented line that evaluates
+    # it. A bare substring match (e.g. a comment that merely mentions
+    # "engram-router hook") used to short-circuit this whole function and
+    # silently skip real integration. A commented-out eval line (# eval
+    # "$(engram-router hook bash)") does nothing at shell start-up, so it
+    # deliberately does NOT count as loaded either — the anchor requires
+    # "eval" right after optional leading whitespace, never after "#".
+    if [[ -f "$rc_file" ]] && grep -Eq '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$rc_file" 2>/dev/null; then
         say "$display_rc ya carga el hook de engram-router; no hace falta nada más."
+        [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
         return
     fi
 
@@ -992,15 +1018,31 @@ offer_shell_integration() {
                 write_file="$(readlink -f -- "$rc_file" 2>/dev/null)" || write_file=""
                 [[ -z "$write_file" ]] && ok=0
             fi
+            local rc_existed=0
+            [[ $ok -eq 1 && -e "$write_file" ]] && rc_existed=1
             local backup="" tmp=""
-            if [[ $ok -eq 1 && -e "$write_file" ]]; then
-                backup="${write_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)"
+            if [[ $ok -eq 1 && $rc_existed -eq 1 ]]; then
+                # PID-suffixed on top of the timestamp: the flock above
+                # already serializes same-second concurrent writers, but the
+                # suffix keeps the backup name collision-proof even when
+                # flock is unavailable and we degraded to unlocked above.
+                backup="${write_file}.bak-engram-router-$(date +%Y%m%d-%H%M%S)-$$"
                 if cp -p "$write_file" "$backup"; then say "Copia de seguridad del archivo original: $backup"
                 else backup=""; ok=0; fi
             fi
             [[ $ok -eq 1 ]] && { tmp="$(mktemp "${write_file}.engram-router.XXXXXX" 2>/dev/null)" || ok=0; }
-            [[ $ok -eq 1 ]] && { { [[ -e "$write_file" ]] && cat "$write_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
-            [[ $ok -eq 1 ]] && { [[ -e "$write_file" ]] && chmod --reference="$write_file" "$tmp" 2>/dev/null; mv "$tmp" "$write_file" || ok=0; }
+            [[ $ok -eq 1 ]] && { { [[ $rc_existed -eq 1 ]] && cat "$write_file"; printf '\n# [engram-router] shell hook: routes ENGRAM_DATA_DIR per repository. Added by install.sh.\neval "$(engram-router hook %s)"\n' "$hook_shell"; } > "$tmp" || ok=0; }
+            if [[ $ok -eq 1 ]]; then
+                if [[ $rc_existed -eq 1 ]]; then
+                    chmod --reference="$write_file" "$tmp" 2>/dev/null
+                else
+                    # mktemp leaves the temp file at 0600; a freshly created
+                    # rc file should get the sane default (0644) a shell
+                    # would normally create, not a locked-down mode.
+                    chmod 0644 "$tmp" 2>/dev/null
+                fi
+                mv "$tmp" "$write_file" || ok=0
+            fi
             if [[ $ok -eq 1 ]]; then say "Añadida la línea a $display_rc."
             else
                 rm -f "$tmp"
@@ -1012,6 +1054,8 @@ offer_shell_integration() {
             : # nothing to do; the line above already tells them what to add
             ;;
     esac
+
+    [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
 
     say ""
     say "Después, abra una terminal nueva y ejecute: engram-doctor"

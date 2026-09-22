@@ -311,6 +311,123 @@ else
 fi
 
 # ===========================================================================
+# 9) D1: idempotency guard must not fire on a bare substring match. Only an
+#    actually-loaded (uncommented) eval line counts as "already integrated".
+# ===========================================================================
+echo
+echo "== D1(a): a comment merely MENTIONING the hook is not mistaken for it =="
+H9a="$(new_fixture)"
+printf '# reminder: someday configure the engram-router hook by hand\n' > "$H9a/.bashrc"
+orig_9a="$(cat "$H9a/.bashrc")"
+out9a="$(run_offer "$H9a" /bin/bash "s")"
+assert_not_match "D1(a): 'ya carga' is NOT printed for a mere mention" 'ya (carga|está)' "$out9a"
+assert_match "D1(a): the question IS asked" '¿Añado esta línea' "$out9a"
+new_9a="$(cat "$H9a/.bashrc" 2>/dev/null || true)"
+if [[ "$new_9a" == "$orig_9a"* ]]; then
+    _pass "D1(a): original comment preserved as a prefix"
+else
+    _fail "D1(a): original comment preserved as a prefix" "got: $new_9a"
+fi
+real_line_count_9a="$(grep -Ec '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$H9a/.bashrc" 2>/dev/null || true)"
+assert_eq "D1(a): a genuine eval line was actually written" "1" "${real_line_count_9a:-0}"
+
+echo
+echo "== D1(b): a genuine (hand-written) eval line IS recognized as loaded =="
+H9b="$(new_fixture)"
+printf 'eval "$(engram-router hook bash)"\n' > "$H9b/.bashrc"
+out9b="$(run_offer "$H9b" /bin/bash "")"
+assert_match "D1(b): 'ya carga' is printed" 'ya (carga|está)' "$out9b"
+assert_not_match "D1(b): no question is asked" '¿Añado' "$out9b"
+assert_eq "D1(b): file is left byte-identical" \
+    'eval "$(engram-router hook bash)"' "$(cat "$H9b/.bashrc")"
+
+echo
+echo "== D1(c): a COMMENTED-OUT eval line does NOT count as loaded (documented choice: it does nothing, so it must not silence the offer) =="
+H9c="$(new_fixture)"
+printf '# eval "$(engram-router hook bash)"\n' > "$H9c/.bashrc"
+orig_9c="$(cat "$H9c/.bashrc")"
+out9c="$(run_offer "$H9c" /bin/bash "s")"
+assert_not_match "D1(c): 'ya carga' is NOT printed" 'ya (carga|está)' "$out9c"
+assert_match "D1(c): the question IS asked" '¿Añado esta línea' "$out9c"
+assert_match "D1(c): the line ends up added" 'Añadid' "$out9c"
+new_9c="$(cat "$H9c/.bashrc" 2>/dev/null || true)"
+if [[ "$new_9c" == "$orig_9c"* ]]; then
+    _pass "D1(c): original commented-out line preserved as a prefix"
+else
+    _fail "D1(c): original commented-out line preserved as a prefix" "got: $new_9c"
+fi
+real_line_count_9c="$(grep -Ec '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$H9c/.bashrc" 2>/dev/null || true)"
+assert_eq "D1(c): exactly one genuine (uncommented) eval line exists" "1" "${real_line_count_9c:-0}"
+
+# ===========================================================================
+# 10) D2: concurrency — N concurrent invocations against the same fixture
+#     $HOME, all answering "s", must serialize into exactly one marker block,
+#     with no leftover *.engram-router.* artifacts and no clobbered backups.
+# ===========================================================================
+echo
+echo "== D2: N-way concurrent 's' answers serialize the write =="
+if ! command -v flock >/dev/null 2>&1; then
+    echo "  flock is not available in this environment — cannot exercise the"
+    echo "  locked path; skipping the concurrency assertions (documented gap)."
+else
+    N=8
+    REPS=3
+    race_bad=0
+    for rep in $(seq 1 $REPS); do
+        Hd="$(new_fixture)"
+        printf '# pristine rc rep %s\nexport PRISTINE=1\n' "$rep" > "$Hd/.bashrc"
+        pids=()
+        for i in $(seq 1 $N); do
+            run_offer "$Hd" /bin/bash "s" > "$Hd/out_${i}.log" 2>&1 &
+            pids+=("$!")
+        done
+        for pid in "${pids[@]}"; do wait "$pid" || true; done
+
+        marker_count_d="$(grep -Ec '^[[:space:]]*eval[[:space:]].*engram-router[[:space:]]+hook' "$Hd/.bashrc" 2>/dev/null || true)"
+        if [[ "${marker_count_d:-0}" != "1" ]]; then
+            race_bad=1
+            _fail "D2 rep $rep: exactly one marker block after $N concurrent 's' answers" "got ${marker_count_d:-0} — file: $(cat "$Hd/.bashrc" 2>/dev/null)"
+        fi
+
+        leftover_d="$(find "$Hd" -maxdepth 1 -name '*.engram-router.*' ! -name 'out_*.log' 2>/dev/null)"
+        if [[ -n "$leftover_d" ]]; then
+            race_bad=1
+            _fail "D2 rep $rep: no leftover *.engram-router.* artifacts" "found: $leftover_d"
+        fi
+
+        backup_count_d="$(find "$Hd" -maxdepth 1 -name '.bashrc.bak-engram-router-*' 2>/dev/null | wc -l | tr -d ' ')"
+        if [[ "$backup_count_d" != "1" ]]; then
+            race_bad=1
+            _fail "D2 rep $rep: exactly one backup file (only the single actual writer takes one)" "got $backup_count_d"
+        else
+            only_backup_d="$(find "$Hd" -maxdepth 1 -name '.bashrc.bak-engram-router-*' 2>/dev/null | head -n1)"
+            backup_content_d="$(cat "$only_backup_d" 2>/dev/null)"
+            if [[ -z "$backup_content_d" ]]; then
+                race_bad=1
+                _fail "D2 rep $rep: the backup is not empty/clobbered" "empty backup: $only_backup_d"
+            fi
+        fi
+    done
+    if [[ $race_bad -eq 0 ]]; then
+        _pass "D2: $REPS reps of $N concurrent 's' answers each serialize to one marker block, no leftovers, no clobbered backups"
+    fi
+fi
+
+# ===========================================================================
+# 11) D3: a freshly created rc file gets a sane default mode (0644), not
+#     mktemp's 0600.
+# ===========================================================================
+echo
+echo "== D3: a freshly created rc file gets mode 0644 =="
+H11="$(new_fixture)"
+run_offer "$H11" /bin/bash "s" >/dev/null
+if [[ -e "$H11/.bashrc" ]]; then
+    assert_eq "D3: new ~/.bashrc has mode 0644" "644" "$(stat -c %a "$H11/.bashrc" 2>/dev/null)"
+else
+    _fail "D3: new ~/.bashrc has mode 0644" "file was not created"
+fi
+
+# ===========================================================================
 # 8) real $HOME is untouched.
 # ===========================================================================
 echo
